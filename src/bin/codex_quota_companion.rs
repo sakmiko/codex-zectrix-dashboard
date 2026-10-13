@@ -295,7 +295,11 @@ fn spawn_health_probe(state: Arc<HealthState>) -> Option<thread::JoinHandle<()>>
                     format!(
                         "{{\"status\":\"ok\",\"uptime_seconds\":{},\"last_ok_age_seconds\":{},\"quota_fail_streak\":{}}}",
                         now.saturating_sub(state.started_at),
-                        if last_ok == 0 { u64::MAX } else { now.saturating_sub(last_ok) },
+                        if last_ok == 0 {
+                            u64::MAX
+                        } else {
+                            now.saturating_sub(last_ok)
+                        },
                         fails,
                     ),
                 )
@@ -438,10 +442,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         eprintln!(
                             "额度连续失败已达上限({max_fail_streak})，主动退出等待 systemd 重启"
                         );
-                        return Err(format!(
-                            "额度连续失败{streak}次，触发自杀重启"
-                        )
-                        .into());
+                        return Err(format!("额度连续失败{streak}次，触发自杀重启").into());
                     }
                 }
                 quota_deadline = Instant::now()

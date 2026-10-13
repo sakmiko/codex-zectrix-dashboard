@@ -1,9 +1,14 @@
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -217,6 +222,100 @@ fn main() {
     }
 }
 
+/// 健康探针共享状态：主循环每次成功处理后刷新。
+#[derive(Debug)]
+struct HealthState {
+    /// 进程启动时间（unix 秒）。
+    started_at: u64,
+    /// 最近一次主循环成功完成时间（unix 秒），0 表示尚未完成。
+    last_ok_at: AtomicU64,
+    /// 累计连续额度失败次数（达到上限触发自杀）。
+    quota_fail_streak: AtomicU64,
+}
+
+impl HealthState {
+    fn new() -> Arc<Self> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Arc::new(Self {
+            started_at: now,
+            last_ok_at: AtomicU64::new(0),
+            quota_fail_streak: AtomicU64::new(0),
+        })
+    }
+
+    fn mark_ok(&self) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.last_ok_at.store(now, Ordering::Relaxed);
+    }
+}
+
+/// 启动 health 探针（标准库 TcpListener，无额外依赖）。
+/// - `HEALTH_LISTEN` 为空则不启动；默认 `127.0.0.1:9595`。
+/// - `GET /healthz` 返回 200 + `{"status":"ok",...}`；其余路径 404。
+fn spawn_health_probe(state: Arc<HealthState>) -> Option<thread::JoinHandle<()>> {
+    let addr = match std::env::var("HEALTH_LISTEN") {
+        Ok(v) if v.trim().is_empty() => return None,
+        Ok(v) => v,
+        Err(_) => "127.0.0.1:9595".to_owned(),
+    };
+    let listener = match TcpListener::bind(&addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("health探针=绑定失败 {addr}: {e}");
+            return None;
+        }
+    };
+    eprintln!("health探针=监听 {addr}");
+    Some(thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut buf = [0u8; 1024];
+            let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let first_line = req.lines().next().unwrap_or("");
+            let (code, body) = if first_line.starts_with("GET /healthz") {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let last_ok = state.last_ok_at.load(Ordering::Relaxed);
+                let fails = state.quota_fail_streak.load(Ordering::Relaxed);
+                (
+                    200,
+                    format!(
+                        "{{\"status\":\"ok\",\"uptime_seconds\":{},\"last_ok_age_seconds\":{},\"quota_fail_streak\":{}}}",
+                        now.saturating_sub(state.started_at),
+                        if last_ok == 0 {
+                            u64::MAX
+                        } else {
+                            now.saturating_sub(last_ok)
+                        },
+                        fails,
+                    ),
+                )
+            } else {
+                (404, "{\"status\":\"not_found\"}".to_owned())
+            };
+            let resp = format!(
+                "HTTP/1.1 {code} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                if code == 200 { "OK" } else { "Not Found" },
+                body.len(),
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    }))
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
     let data_dir = PathBuf::from(env_value("CODEX_ZECTRIX_DATA_DIR", "/data"));
     fs::create_dir_all(&data_dir)?;
@@ -290,6 +389,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut quota_deadline = Instant::now();
     let mut radar_deadline = quota_deadline;
     let mut quota_pause_active = false;
+    // 额度连续失败计数：达到上限则记日志自杀，由 systemd 拉起。
+    // 可用 QUOTA_MAX_FAIL_STREAK 覆盖，默认 3；暂停窗口内的跳过不计入。
+    let max_fail_streak: u64 = env_value("QUOTA_MAX_FAIL_STREAK", "3")
+        .parse()
+        .unwrap_or(3)
+        .max(1);
+    let health = HealthState::new();
+    let _health_handle = spawn_health_probe(Arc::clone(&health));
     loop {
         let now = unix_time_seconds()?;
         if Instant::now() >= quota_deadline {
@@ -324,6 +431,18 @@ fn run() -> Result<(), Box<dyn Error>> {
                     Err(_) => {
                         current_quota = None;
                         eprintln!("额度轮询=失败 且无可用缓存");
+                    }
+                }
+                if read_succeeded {
+                    health.quota_fail_streak.store(0, Ordering::Relaxed);
+                } else {
+                    let streak = health.quota_fail_streak.fetch_add(1, Ordering::Relaxed) + 1;
+                    eprintln!("额度连续失败={streak}/{max_fail_streak}");
+                    if streak >= max_fail_streak {
+                        eprintln!(
+                            "额度连续失败已达上限({max_fail_streak})，主动退出等待 systemd 重启"
+                        );
+                        return Err(format!("额度连续失败{streak}次，触发自杀重启").into());
                     }
                 }
                 quota_deadline = Instant::now()
@@ -398,6 +517,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         let wait = quota_deadline
             .saturating_duration_since(Instant::now())
             .min(radar_deadline.saturating_duration_since(Instant::now()));
+        health.mark_ok();
         thread::sleep(wait);
     }
 }

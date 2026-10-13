@@ -1,0 +1,20 @@
+{
+  "rateLimits": {
+    "primary": {
+      "usedPercent": 37,
+      "windowDurationMins": 300,
+      "resetsAt": 1786337200
+    },
+    "secondary": null,
+    "planType": "plus",
+    "limitName": "Codex"
+  },
+  "rateLimitResetCredits": {
+    "availableCount": 0,
+    "credits": []
+  },
+  "account": {
+    "email": "SECRET_ACCOUNT_MARKER"
+  },
+  "accessToken": "SECRET_TOKEN_MARKER"
+}

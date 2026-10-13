@@ -1,0 +1,11 @@
+{
+  "rateLimits": {
+    "windows": [
+      {
+        "used": 37,
+        "duration": 300,
+        "reset": 1786337200
+      }
+    ]
+  }
+}

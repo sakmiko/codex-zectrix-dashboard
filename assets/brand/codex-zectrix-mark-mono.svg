@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Dashboard for ZECTRIX monochrome logo</title>
+  <desc id="desc">A monochrome e-paper status panel containing a geometric C.</desc>
+  <rect x="56" y="46" width="400" height="416" rx="66" fill="#FFFFFF" stroke="#11110F" stroke-width="18"/>
+  <rect x="94" y="88" width="324" height="292" rx="29" fill="#11110F"/>
+  <path d="M334 140H166V328H334V282H214V186H334V140Z" fill="#FFFFFF"/>
+  <circle cx="374" cy="422" r="13" fill="#11110F"/>
+</svg>

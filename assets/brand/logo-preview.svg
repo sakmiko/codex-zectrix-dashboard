@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Dashboard for ZECTRIX logo preview</title>
+  <desc id="desc">Primary, dark-background, monochrome, and small-size logo checks.</desc>
+  <rect width="1200" height="760" rx="32" fill="#F2F0E8"/>
+
+  <g font-family="Arial, Microsoft YaHei, PingFang SC, sans-serif">
+    <text x="64" y="72" fill="#11110F" font-size="34" font-weight="750">Codex Dashboard for ZECTRIX</text>
+    <text x="64" y="108" fill="#64625C" font-size="19">电子纸状态卡 · 本地渲染 · 仅在画面变化时推送</text>
+  </g>
+
+  <rect x="64" y="150" width="504" height="454" rx="28" fill="#FFFEF9"/>
+  <image href="codex-zectrix-mark.svg" x="141" y="174" width="350" height="350"/>
+  <text x="100" y="560" fill="#64625C" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" letter-spacing="1">PRIMARY / WARM PAPER</text>
+
+  <rect x="600" y="150" width="536" height="270" rx="28" fill="#11110F"/>
+  <image href="codex-zectrix-mark.svg" x="654" y="173" width="224" height="224"/>
+  <g font-family="Arial, Microsoft YaHei, PingFang SC, sans-serif">
+    <text x="914" y="245" fill="#FFFEF9" font-size="26" font-weight="700">状态屏里的 C</text>
+    <text x="914" y="282" fill="#C9C6BB" font-size="18">面板 + 项目首字母</text>
+    <text x="914" y="314" fill="#C9C6BB" font-size="18">红点 = changed frame</text>
+  </g>
+
+  <rect x="600" y="452" width="254" height="242" rx="28" fill="#FFFEF9"/>
+  <image href="codex-zectrix-mark-mono.svg" x="647" y="474" width="160" height="160"/>
+  <text x="637" y="665" fill="#64625C" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">MONO / E-INK</text>
+
+  <rect x="882" y="452" width="254" height="242" rx="28" fill="#D8D4C9"/>
+  <g transform="translate(915 492)">
+    <image href="codex-zectrix-mark.svg" width="96" height="96"/>
+    <image href="codex-zectrix-mark.svg" x="118" y="16" width="64" height="64"/>
+    <image href="codex-zectrix-mark.svg" x="10" y="124" width="32" height="32"/>
+    <image href="codex-zectrix-mark.svg" x="72" y="128" width="24" height="24"/>
+    <image href="codex-zectrix-mark.svg" x="124" y="132" width="16" height="16"/>
+  </g>
+</svg>

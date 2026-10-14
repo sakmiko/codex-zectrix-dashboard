@@ -283,7 +283,9 @@ fn spawn_health_probe(state: Arc<HealthState>) -> Option<thread::JoinHandle<()>>
             let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             let first_line = req.lines().next().unwrap_or("");
-            let (code, body) = if first_line.starts_with("GET /healthz") {
+            let (code, body) = if first_line.starts_with("GET /healthz")
+                || first_line.starts_with("GET /health")
+            {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -317,6 +319,9 @@ fn spawn_health_probe(state: Arc<HealthState>) -> Option<thread::JoinHandle<()>>
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    let health = HealthState::new();
+    let _health_handle = spawn_health_probe(Arc::clone(&health));
+
     let data_dir = PathBuf::from(env_value("CODEX_ZECTRIX_DATA_DIR", "/data"));
     fs::create_dir_all(&data_dir)?;
 
@@ -395,8 +400,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         .parse()
         .unwrap_or(3)
         .max(1);
-    let health = HealthState::new();
-    let _health_handle = spawn_health_probe(Arc::clone(&health));
     loop {
         let now = unix_time_seconds()?;
         if Instant::now() >= quota_deadline {

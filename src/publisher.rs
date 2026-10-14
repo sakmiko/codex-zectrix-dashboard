@@ -261,11 +261,12 @@ impl PublishCoordinator {
 
 fn visible_state_hash(state: &NormalizedDashboardState, _now_epoch_seconds: i64) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"codex-zectrix-visible-state-v8\0");
+    digest.update(b"codex-zectrix-visible-state-v9\0");
     for window in &state.quota.windows {
         digest.update(window.name.as_bytes());
         digest.update([0, window.remaining_percent]);
     }
+    digest.update(state.quota.reset_credits.to_le_bytes());
     match &state.radar {
         RadarDisplayState::Unavailable => digest.update([0]),
         RadarDisplayState::NoActiveWatch => digest.update([1]),
@@ -298,15 +299,27 @@ fn reset_labels_changed(
     current: &NormalizedDashboardState,
     now_epoch_seconds: i64,
 ) -> bool {
-    let previous = reset_timestamps(previous);
-    let current = reset_timestamps(current);
-    previous != current
+    let prev_ts = reset_timestamps(previous);
+    let curr_ts = reset_timestamps(current);
+    prev_ts != curr_ts
         && previous
+            .quota
+            .windows
             .iter()
-            .map(|timestamp| crate::quota_reset_label(*timestamp, now_epoch_seconds))
-            .ne(current
-                .iter()
-                .map(|timestamp| crate::quota_reset_label(*timestamp, now_epoch_seconds)))
+            .map(|w| {
+                crate::quota_window_reset_label(
+                    w.name.as_str(),
+                    w.resets_at_epoch_seconds,
+                    now_epoch_seconds,
+                )
+            })
+            .ne(current.quota.windows.iter().map(|w| {
+                crate::quota_window_reset_label(
+                    w.name.as_str(),
+                    w.resets_at_epoch_seconds,
+                    now_epoch_seconds,
+                )
+            }))
 }
 
 fn persisted_reset_labels_changed(
@@ -314,14 +327,24 @@ fn persisted_reset_labels_changed(
     current: &NormalizedDashboardState,
     now_epoch_seconds: i64,
 ) -> bool {
-    let current = reset_timestamps(current);
-    previous != current
-        && previous
-            .iter()
-            .map(|timestamp| crate::quota_reset_label(*timestamp, now_epoch_seconds))
-            .ne(current
-                .iter()
-                .map(|timestamp| crate::quota_reset_label(*timestamp, now_epoch_seconds)))
+    let current_ts = reset_timestamps(current);
+    if previous == current_ts {
+        return false;
+    }
+    if previous.len() != current.quota.windows.len() {
+        return true;
+    }
+    previous
+        .iter()
+        .zip(current.quota.windows.iter())
+        .any(|(prev_timestamp, win)| {
+            crate::quota_window_reset_label(win.name.as_str(), *prev_timestamp, now_epoch_seconds)
+                != crate::quota_window_reset_label(
+                    win.name.as_str(),
+                    win.resets_at_epoch_seconds,
+                    now_epoch_seconds,
+                )
+        })
 }
 
 fn reset_timestamps(state: &NormalizedDashboardState) -> Vec<i64> {

@@ -1,0 +1,16 @@
+name: Generate Preview
+
+on:
+  workflow_dispatch:
+
+jobs:
+  preview:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo run --bin render_quota_preview
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-artifact
+          path: preview.png

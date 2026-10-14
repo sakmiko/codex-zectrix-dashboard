@@ -283,7 +283,9 @@ fn spawn_health_probe(state: Arc<HealthState>) -> Option<thread::JoinHandle<()>>
             let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             let first_line = req.lines().next().unwrap_or("");
-            let (code, body) = if first_line.starts_with("GET /healthz") {
+            let (code, body) = if first_line.starts_with("GET /healthz")
+                || first_line.starts_with("GET /health")
+            {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -317,6 +319,9 @@ fn spawn_health_probe(state: Arc<HealthState>) -> Option<thread::JoinHandle<()>>
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    let health = HealthState::new();
+    let _health_handle = spawn_health_probe(Arc::clone(&health));
+
     let data_dir = PathBuf::from(env_value("CODEX_ZECTRIX_DATA_DIR", "/data"));
     fs::create_dir_all(&data_dir)?;
 
@@ -395,8 +400,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         .parse()
         .unwrap_or(3)
         .max(1);
-    let health = HealthState::new();
-    let _health_handle = spawn_health_probe(Arc::clone(&health));
     loop {
         let now = unix_time_seconds()?;
         if Instant::now() >= quota_deadline {
@@ -1529,5 +1532,85 @@ mod tests {
         for field in ["disabled", "excluded_models", "request_retry", "websockets"] {
             assert!(value.get(field).is_some(), "字段 {field} 未保留");
         }
+    }
+
+    #[test]
+    fn health_probe_reports_ok_and_handles_paths() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let health = HealthState::new();
+        health.mark_ok();
+
+        // 绑定随机端口以防测试端口冲突
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = Arc::clone(&health);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let first_line = req.lines().next().unwrap_or("");
+                let (code, body) = if first_line.starts_with("GET /healthz") {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let last_ok = state.last_ok_at.load(Ordering::Relaxed);
+                    let fails = state.quota_fail_streak.load(Ordering::Relaxed);
+                    (
+                        200,
+                        format!(
+                            "{{\"status\":\"ok\",\"uptime_seconds\":{},\"last_ok_age_seconds\":{},\"quota_fail_streak\":{}}}",
+                            now.saturating_sub(state.started_at),
+                            if last_ok == 0 {
+                                u64::MAX
+                            } else {
+                                now.saturating_sub(last_ok)
+                            },
+                            fails,
+                        ),
+                    )
+                } else {
+                    (404, "{\"status\":\"not_found\"}".to_owned())
+                };
+                let resp = format!(
+                    "HTTP/1.1 {code} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    if code == 200 { "OK" } else { "Not Found" },
+                    body.len(),
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        // 1. 测试 GET /healthz 接口响应 200
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut resp = String::new();
+        stream.read_to_string(&mut resp).unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp.contains("\"status\":\"ok\""));
+
+        // 2. 测试非 /healthz 路径返回 404
+        let mut stream_404 = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        stream_404.write_all(b"GET /other HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut resp_404 = String::new();
+        stream_404.read_to_string(&mut resp_404).unwrap();
+        assert!(resp_404.starts_with("HTTP/1.1 404 Not Found"));
+        assert!(resp_404.contains("\"status\":\"not_found\""));
+
+        // 正常结束探针循环
+        drop(TcpStream::connect(format!("127.0.0.1:{port}")));
+        let _ = handle.join();
     }
 }

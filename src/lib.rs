@@ -5,22 +5,16 @@ use std::convert::Infallible;
 use std::io::Cursor;
 use std::path::Path;
 
+use chrono::{DateTime, Datelike, Local, Timelike, Utc};
 use embedded_graphics::geometry::{OriginDimensions, Size};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::{DrawTarget, Pixel, Point};
-use embedded_graphics::primitives::{
-    Circle, CornerRadii, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle,
-    StyledDrawable,
-};
 use image::GrayImage;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use u8g2_fonts::FontRenderer;
-use u8g2_fonts::fonts::{
-    u8g2_font_fub14_tr, u8g2_font_fub30_tn, u8g2_font_fub42_tn, u8g2_font_helvB08_tr,
-    u8g2_font_helvB10_tr, u8g2_font_helvB12_tr, u8g2_font_wqy13_t_gb2312, u8g2_font_wqy15_t_gb2312,
-};
+use u8g2_fonts::fonts::{u8g2_font_wqy13_t_gb2312, u8g2_font_wqy15_t_gb2312};
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
 pub use publisher::{
@@ -206,6 +200,7 @@ pub fn normalize_dashboard(
         radar: observed.radar,
     }
 }
+
 pub fn render_normalized_dashboard(
     normalized: NormalizedDashboardState,
     now_epoch_seconds: i64,
@@ -253,12 +248,6 @@ fn draw_dashboard(
     let mut display = FrameDisplay::new();
     let title_font = FontRenderer::new::<u8g2_font_wqy15_t_gb2312>();
     let body_font = FontRenderer::new::<u8g2_font_wqy13_t_gb2312>();
-    let en_badge_font = FontRenderer::new::<u8g2_font_helvB10_tr>();
-    let en_bold_font = FontRenderer::new::<u8g2_font_helvB12_tr>();
-    let en_micro_font = FontRenderer::new::<u8g2_font_helvB08_tr>();
-    let hero_num_font = FontRenderer::new::<u8g2_font_fub42_tn>();
-    let card_num_font = FontRenderer::new::<u8g2_font_fub30_tn>();
-    let percent_font = FontRenderer::new::<u8g2_font_fub14_tr>();
 
     let mut visible = Vec::new();
 
@@ -269,111 +258,125 @@ fn draw_dashboard(
     }
 
     // ==========================================
-    // 1. 顶部状态栏 Header (Y: 6 .. 34)
+    // 1. 顶部工业风硬朗状态栏 Header (X: 8..390, Y: 6..32)
     // ==========================================
-    // 黑色品牌微胶囊 [ CODEX ]
-    draw_rounded_box(10, 8, 58, 20, 3, None, Some(BinaryColor::On), &mut display);
-    draw_text_aligned(
-        &en_badge_font,
-        "CODEX",
-        39,
-        22,
-        HorizontalAlignment::Center,
+    display.fill_rect(8, 6, 382, 26, BinaryColor::On);
+    for (cx, cy) in [(8, 6), (389, 6), (8, 31), (389, 31)] {
+        display.draw_pixel(cx, cy, BinaryColor::Off);
+    }
+
+    // 左侧白底方块品牌铭牌 [ CODEX ]
+    display.fill_rect(12, 10, 66, 18, BinaryColor::Off);
+    draw_micro_pixel_str("CODEX", 16, 12, 2, 2, BinaryColor::On, 2, &mut display);
+
+    // 主标题 "配额监控"
+    draw_text_color(
+        &title_font,
+        "配额监控",
+        86,
+        24,
         BinaryColor::Off,
         &mut display,
     )?;
-
-    // 主标题 "配额监控"
-    draw_text(&title_font, "配额监控", 76, 24, &mut display)?;
     visible.push("配额监控".into());
 
-    // 右侧运行/过期状态
-    if state.quota.stale {
-        // 醒目的反色告警胶囊
-        draw_rounded_box(
-            264,
-            8,
-            126,
-            20,
-            3,
-            None,
-            Some(BinaryColor::On),
+    // 若存在储备重置券，在顶栏中部展示方块徽标
+    if state.quota.reset_credits > 0 {
+        let credits = state.quota.reset_credits;
+        visible.push(format!("重置券×{credits}"));
+        display.stroke_rect(158, 10, 82, 18, 1, BinaryColor::Off);
+        draw_text_color(
+            &body_font,
+            "重置券×",
+            165,
+            23,
+            BinaryColor::Off,
+            &mut display,
+        )?;
+        let credits_str = credits.to_string();
+        draw_block_number_str(
+            credits_str.as_str(),
+            220,
+            13,
+            7,
+            12,
+            2,
+            2,
+            false,
+            BinaryColor::Off,
             &mut display,
         );
-        // 小惊叹号圆点
-        Circle::new(Point::new(273, 14), 7)
-            .draw_styled(&PrimitiveStyle::with_fill(BinaryColor::Off), &mut display)
-            .unwrap();
-        display.draw_pixel(276, 17, BinaryColor::On);
-        draw_text_aligned(
+    }
+
+    // 右侧运行/过期状态指示器
+    if state.quota.stale {
+        // 醒目的白底反色告警模块 + 2px 标准像素感叹号方框
+        display.fill_rect(276, 9, 110, 20, BinaryColor::Off);
+        display.fill_rect(281, 12, 14, 14, BinaryColor::On);
+        display.fill_rect(287, 14, 2, 6, BinaryColor::Off);
+        display.fill_rect(287, 22, 2, 2, BinaryColor::Off);
+        draw_text_color(
             &body_font,
             "额度未更新",
-            335,
+            300,
             23,
-            HorizontalAlignment::Center,
-            BinaryColor::Off,
+            BinaryColor::On,
             &mut display,
         )?;
         visible.push("额度未更新".into());
     } else {
-        // 优雅的白底线框状态胶囊 [ ● 已更新 ]
-        draw_rounded_box(306, 8, 84, 20, 4, Some(BinaryColor::On), None, &mut display);
-        Circle::new(Point::new(315, 15), 5)
-            .draw_styled(&PrimitiveStyle::with_fill(BinaryColor::On), &mut display)
-            .unwrap();
-        draw_text(&body_font, "已更新", 325, 23, &mut display)?;
+        // 线框同步状态模块 [ ■ 实时同步 ]
+        display.stroke_rect(308, 10, 78, 18, 1, BinaryColor::Off);
+        display.fill_rect(315, 16, 6, 6, BinaryColor::Off);
+        draw_text_color(
+            &body_font,
+            "实时同步",
+            326,
+            23,
+            BinaryColor::Off,
+            &mut display,
+        )?;
         visible.push("已更新".into());
     }
 
-    // 顶部点阵分割线 (更通透的 33% 墨水屏浅色点阵线)
-    draw_dotted_hline(10, 390, 35, 3, &mut display);
-
     // ==========================================
-    // 2. 中部配额卡片区 (Y: 42 .. 182)
+    // 2. 中部配额卡片区 (Y: 38 .. 180)
     // ==========================================
     match state.quota.windows.as_slice() {
         [window] => {
-            // 单窗口：居中大卡片
             draw_single_quota_card(
                 window,
-                10,
-                42,
-                380,
-                140,
+                8,
+                38,
+                382,
+                142,
                 now_epoch_seconds,
                 &title_font,
                 &body_font,
-                &hero_num_font,
-                &percent_font,
                 &mut display,
                 &mut visible,
             )?;
         }
         [first, second] => {
-            // 双窗口：左右两张纯白底色精致工业风卡片
             draw_dual_quota_card(
                 first,
-                10,
-                42,
+                8,
+                38,
                 186,
-                140,
+                142,
                 now_epoch_seconds,
                 &body_font,
-                &card_num_font,
-                &percent_font,
                 &mut display,
                 &mut visible,
             )?;
             draw_dual_quota_card(
                 second,
                 204,
-                42,
+                38,
                 186,
-                140,
+                142,
                 now_epoch_seconds,
                 &body_font,
-                &card_num_font,
-                &percent_font,
                 &mut display,
                 &mut visible,
             )?;
@@ -382,18 +385,16 @@ fn draw_dashboard(
     }
 
     // ==========================================
-    // 3. 底部重置雷达区 (Y: 190 .. 294)
+    // 3. 底部重置雷达控制台 (X: 8, Y: 188, W: 382, H: 102)
     // ==========================================
     draw_modern_reset_radar(
         &state.radar,
-        10,
-        190,
-        380,
+        8,
+        188,
+        382,
         102,
         &title_font,
         &body_font,
-        &en_bold_font,
-        &en_micro_font,
         &mut display,
         &mut visible,
     )?;
@@ -401,7 +402,7 @@ fn draw_dashboard(
     Ok((display.pixels, visible))
 }
 
-/// 绘制双窗口单张卡片 (宽 186, 高 140)
+/// 绘制双窗口单张工业风墨水屏卡片 (宽 186, 高 142)
 #[allow(clippy::too_many_arguments)]
 fn draw_dual_quota_card(
     window: &NormalizedQuotaWindow,
@@ -411,94 +412,155 @@ fn draw_dual_quota_card(
     h: u32,
     now_epoch_seconds: i64,
     body_font: &FontRenderer,
-    number_font: &FontRenderer,
-    percent_font: &FontRenderer,
     display: &mut FrameDisplay,
     visible: &mut Vec<String>,
 ) -> Result<(), DashboardError> {
-    // 1. 卡片圆角外框
-    draw_rounded_box(x, y, w, h, 4, Some(BinaryColor::On), None, display);
+    let w_i32 = w as i32;
 
-    // 2. 顶部胶囊标签：窗口名称
-    let name_str = window.name.as_str();
+    // 1. 2px 倒角硬朗外框 + 2px 立体实体阴影
+    display.draw_chamfer_card(x, y, w, h, 2);
+
+    // 2. 顶部结构化标题栏 (高 23px + 2px 底部主分割线)
+    display.fill_rect(x + 2, y + 2, w.saturating_sub(4), 23, BinaryColor::Off);
+    display.fill_rect(x + 2, y + 25, w.saturating_sub(4), 2, BinaryColor::On);
+
+    // 左上角斜切黑底窗口铭牌
+    let tab_w: u32 = 72;
+    display.fill_rect(x + 2, y + 2, tab_w, 23, BinaryColor::On);
+    for dy in 0..23_i32 {
+        let cut_w = (dy / 3) as u32;
+        if cut_w > 0 {
+            display.fill_rect(
+                x + 2 + tab_w as i32,
+                y + 2 + dy,
+                cut_w,
+                1,
+                BinaryColor::On,
+            );
+        }
+    }
+
     visible.push(window.name.clone());
-    let badge_width = (name_str.chars().count() as u32 * 14 + 16).clamp(46, 100);
-    draw_rounded_box(
-        x + 8,
-        y + 8,
-        badge_width,
-        19,
-        3,
-        None,
-        Some(BinaryColor::On),
-        display,
-    );
-    draw_text_aligned(
+    draw_window_tab_title(
         body_font,
-        name_str,
-        x + 8 + (badge_width as i32) / 2,
-        y + 22,
-        HorizontalAlignment::Center,
+        window.name.as_str(),
+        x + 2 + (tab_w as i32) / 2,
+        y + 7,
         BinaryColor::Off,
         display,
     )?;
 
-    // 右上角 "剩余额度" 说明 (采用 13 点阵保证笔画绝对清晰)
+    // 右上角 "剩余额度" 标识
     draw_text_aligned(
         body_font,
         "剩余额度",
-        x + (w as i32) - 8,
-        y + 22,
+        x + w_i32 - 8,
+        y + 18,
         HorizontalAlignment::Right,
         BinaryColor::On,
         display,
     )?;
 
-    // 3. 核心数值大字
+    // 3. 中部核心方块大数字区 + 右侧已用百分比遥测列
     let remaining_str = window.remaining_percent.to_string();
     visible.push(format!("{remaining_str}% 剩余"));
-    draw_text(number_font, remaining_str.as_str(), x + 10, y + 64, display)?;
+    let mut cur_dx = x + 10;
+    for ch in remaining_str.chars() {
+        draw_block_digit(ch, cur_dx, y + 32, 22, 36, 6, true, BinaryColor::On, display);
+        cur_dx += 26;
+    }
+    draw_block_percent(cur_dx + 2, y + 48, 18, 3, BinaryColor::On, display);
 
-    // 获取数字渲染宽度以紧贴 "%" 符号
-    let num_dims = number_font
-        .get_rendered_dimensions(
-            remaining_str.as_str(),
-            Point::zero(),
-            VerticalPosition::Baseline,
-        )
-        .map(|d| d.advance.x)
-        .unwrap_or(36);
-    draw_text(percent_font, "%", x + 14 + num_dims, y + 60, display)?;
-
-    // 4. 正式高精度刻度进度条
-    let bar_x = x + 10;
-    let bar_y = y + 76;
-    let bar_w = w.saturating_sub(20);
-    let bar_h = 10;
-    draw_formal_progress_bar(
-        window.remaining_percent,
-        bar_x,
-        bar_y,
-        bar_w,
-        bar_h,
-        true,
+    // 右侧已用额度分栏
+    draw_dotted_vline(x + w_i32 - 62, y + 31, y + 69, 2, display);
+    draw_text_aligned(
+        body_font,
+        "已用",
+        x + w_i32 - 34,
+        y + 43,
+        HorizontalAlignment::Center,
+        BinaryColor::On,
+        display,
+    )?;
+    let used_str = format!("{}%", window.used_percent);
+    let used_w = block_number_str_width(used_str.as_str(), 7, 13, 2, 2);
+    draw_block_number_str(
+        used_str.as_str(),
+        x + w_i32 - 34 - (used_w / 2),
+        y + 51,
+        7,
+        13,
+        2,
+        2,
+        false,
+        BinaryColor::On,
         display,
     );
 
-    // 5. 点阵横向分割线
-    draw_dotted_hline(x + 8, x + (w as i32) - 8, y + 99, 3, display);
+    // 4. 10 格工业方块矩阵进度条 (带墨水屏网点底纹与刻度)
+    draw_segmented_gauge(
+        window.remaining_percent,
+        x + 10,
+        y + 75,
+        w.saturating_sub(20),
+        12,
+        10,
+        display,
+    );
 
-    // 6. 底部重置倒计时
-    let reset_text = quota_reset_label(window.resets_at_epoch_seconds, now_epoch_seconds);
-    visible.push(reset_text.clone());
-    draw_clock_icon(x + 10, y + 109, display);
-    let fitted_reset = fit_text(body_font, reset_text.as_str(), (w as i32) - 34);
-    draw_text(body_font, fitted_reset.as_str(), x + 26, y + 121, display)?;
+    // 5. 底部精确重置时刻区 (Y: y + 96 .. y + 140)
+    display.fill_rect(x + 2, y + 96, w.saturating_sub(4), 1, BinaryColor::On);
+    display.fill_rect(x + 8, y + 101, 34, 16, BinaryColor::On);
+    draw_text_aligned(
+        body_font,
+        "重置",
+        x + 25,
+        y + 114,
+        HorizontalAlignment::Center,
+        BinaryColor::Off,
+        display,
+    )?;
+
+    let is_long = is_long_quota_window(
+        window.name.as_str(),
+        window.resets_at_epoch_seconds,
+        now_epoch_seconds,
+    );
+    let reset_label = quota_window_reset_label(
+        window.name.as_str(),
+        window.resets_at_epoch_seconds,
+        now_epoch_seconds,
+    );
+    visible.push(reset_label);
+
+    if is_long {
+        draw_text(body_font, "周期重置时刻", x + 46, y + 114, display)?;
+        draw_exact_reset_timestamp(
+            body_font,
+            true,
+            window.resets_at_epoch_seconds,
+            x + 10,
+            y + 121,
+            false,
+            display,
+        )?;
+    } else {
+        draw_text(body_font, "窗口重置时刻", x + 46, y + 114, display)?;
+        draw_exact_reset_timestamp(
+            body_font,
+            false,
+            window.resets_at_epoch_seconds,
+            x + 10,
+            y + 121,
+            false,
+            display,
+        )?;
+    }
 
     Ok(())
 }
 
-/// 绘制单窗口居中大卡片 (宽 380, 高 140)
+/// 绘制单窗口居中大卡片 (宽 382, 高 142)
 #[allow(clippy::too_many_arguments)]
 fn draw_single_quota_card(
     window: &NormalizedQuotaWindow,
@@ -509,96 +571,138 @@ fn draw_single_quota_card(
     now_epoch_seconds: i64,
     title_font: &FontRenderer,
     body_font: &FontRenderer,
-    hero_num_font: &FontRenderer,
-    percent_font: &FontRenderer,
     display: &mut FrameDisplay,
     visible: &mut Vec<String>,
 ) -> Result<(), DashboardError> {
-    // 1. 卡片圆角外框
-    draw_rounded_box(x, y, w, h, 4, Some(BinaryColor::On), None, display);
+    let w_i32 = w as i32;
+    let h_i32 = h as i32;
 
-    // 2. 左侧 HERO 数值区 (宽 180)
-    let name_str = window.name.as_str();
+    // 1. 2px 倒角外框与立体阴影
+    display.draw_chamfer_card(x, y, w, h, 2);
+
+    // 2. 顶部结构化标题栏
+    display.fill_rect(x + 2, y + 2, w.saturating_sub(4), 24, BinaryColor::Off);
+    display.fill_rect(x + 2, y + 26, w.saturating_sub(4), 2, BinaryColor::On);
+
+    let tab_w: u32 = 88;
+    display.fill_rect(x + 2, y + 2, tab_w, 24, BinaryColor::On);
+    for dy in 0..24_i32 {
+        let cut_w = (dy / 3) as u32;
+        if cut_w > 0 {
+            display.fill_rect(
+                x + 2 + tab_w as i32,
+                y + 2 + dy,
+                cut_w,
+                1,
+                BinaryColor::On,
+            );
+        }
+    }
+
     visible.push(window.name.clone());
-    let badge_width = (name_str.chars().count() as u32 * 15 + 16).clamp(52, 120);
-    draw_rounded_box(
-        x + 12,
-        y + 10,
-        badge_width,
-        21,
-        3,
-        None,
-        Some(BinaryColor::On),
-        display,
-    );
-    draw_text_aligned(
+    draw_window_tab_title(
         title_font,
-        name_str,
-        x + 12 + (badge_width as i32) / 2,
-        y + 25,
-        HorizontalAlignment::Center,
+        window.name.as_str(),
+        x + 2 + (tab_w as i32) / 2,
+        y + 7,
         BinaryColor::Off,
         display,
     )?;
 
-    let remaining_str = window.remaining_percent.to_string();
-    visible.push(format!("{remaining_str}% 剩余"));
-    draw_text(
-        hero_num_font,
-        remaining_str.as_str(),
-        x + 12,
-        y + 84,
+    draw_text_aligned(
+        body_font,
+        "配额实时状态看板",
+        x + w_i32 - 12,
+        y + 19,
+        HorizontalAlignment::Right,
+        BinaryColor::On,
         display,
     )?;
-    let num_dims = hero_num_font
-        .get_rendered_dimensions(
-            remaining_str.as_str(),
-            Point::zero(),
-            VerticalPosition::Baseline,
-        )
-        .map(|d| d.advance.x)
-        .unwrap_or(54);
-    draw_text(percent_font, "%", x + 16 + num_dims, y + 78, display)?;
-    draw_text(body_font, "剩余额度", x + 14, y + 115, display)?;
 
-    // 垂直点阵分割线
-    draw_dotted_vline(x + 175, y + 12, y + (h as i32) - 12, 3, display);
+    // 3. 左侧超大方块 HERO 百分比区
+    let remaining_str = window.remaining_percent.to_string();
+    visible.push(format!("{remaining_str}% 剩余"));
+    let mut cur_dx = x + 16;
+    for ch in remaining_str.chars() {
+        draw_block_digit(ch, cur_dx, y + 38, 28, 48, 7, true, BinaryColor::On, display);
+        cur_dx += 34;
+    }
+    draw_block_percent(cur_dx + 4, y + 62, 22, 4, BinaryColor::On, display);
 
-    // 3. 右侧详情区 (X: x + 185)
-    let right_x = x + 192;
-    draw_text(title_font, "额度状态", right_x, y + 26, display)?;
-
-    let bar_w = 172;
-    let bar_h = 12;
-    draw_formal_progress_bar(
-        window.remaining_percent,
-        right_x,
-        y + 44,
-        bar_w,
-        bar_h,
-        true,
+    draw_text(body_font, "剩余额度 / 已用", x + 16, y + 107, display)?;
+    let used_str = format!("{}%", window.used_percent);
+    draw_block_number_str(
+        used_str.as_str(),
+        x + 118,
+        y + 96,
+        7,
+        13,
+        2,
+        2,
+        false,
+        BinaryColor::On,
         display,
     );
 
-    // 进度条刻度说明
-    draw_dotted_hline(right_x, right_x + bar_w as i32, y + 76, 3, display);
+    // 垂直点阵分割线
+    draw_dotted_vline(x + 176, y + 32, y + h_i32 - 8, 2, display);
 
-    // 重置时间信息
-    let reset_text = quota_reset_label(window.resets_at_epoch_seconds, now_epoch_seconds);
-    visible.push(reset_text.clone());
-    draw_clock_icon(right_x + 2, y + 98, display);
-    draw_text(
-        title_font,
-        reset_text.as_str(),
-        right_x + 22,
-        y + 112,
+    // 4. 右侧详情与精确重置时刻区
+    let right_x = x + 190;
+    draw_text(body_font, "当前额度余量", right_x, y + 45, display)?;
+    draw_segmented_gauge(window.remaining_percent, right_x, y + 52, 178, 14, 10, display);
+
+    display.fill_rect(right_x, y + 78, 178, 1, BinaryColor::On);
+    display.fill_rect(right_x, y + 86, 36, 16, BinaryColor::On);
+    draw_text_aligned(
+        body_font,
+        "重置",
+        right_x + 18,
+        y + 99,
+        HorizontalAlignment::Center,
+        BinaryColor::Off,
         display,
     )?;
+    draw_text(body_font, "精确重置时刻", right_x + 42, y + 99, display)?;
+
+    let is_long = is_long_quota_window(
+        window.name.as_str(),
+        window.resets_at_epoch_seconds,
+        now_epoch_seconds,
+    );
+    let reset_label = quota_window_reset_label(
+        window.name.as_str(),
+        window.resets_at_epoch_seconds,
+        now_epoch_seconds,
+    );
+    visible.push(reset_label);
+
+    if is_long {
+        draw_exact_reset_timestamp(
+            body_font,
+            true,
+            window.resets_at_epoch_seconds,
+            right_x,
+            y + 109,
+            true,
+            display,
+        )?;
+    } else {
+        draw_exact_reset_timestamp(
+            body_font,
+            false,
+            window.resets_at_epoch_seconds,
+            right_x,
+            y + 109,
+            true,
+            display,
+        )?;
+    }
 
     Ok(())
 }
 
-/// 绘制底部现代重置雷达 (宽 380, 高 102)
+/// 绘制底部现代工业风重置雷达控制台 (宽 382, 高 102)
 #[allow(clippy::too_many_arguments)]
 fn draw_modern_reset_radar(
     radar: &RadarDisplayState,
@@ -608,17 +712,21 @@ fn draw_modern_reset_radar(
     h: u32,
     title_font: &FontRenderer,
     body_font: &FontRenderer,
-    en_bold_font: &FontRenderer,
-    en_micro_font: &FontRenderer,
     display: &mut FrameDisplay,
     visible: &mut Vec<String>,
 ) -> Result<(), DashboardError> {
-    // 1. 卡片外框
-    draw_rounded_box(x, y, w, h, 4, Some(BinaryColor::On), None, display);
+    let w_i32 = w as i32;
 
-    // 2. 标题行与雷达图标
-    draw_radar_icon(x + 12, y + 10, display);
-    draw_text(title_font, "Codex 重置雷达", x + 34, y + 24, display)?;
+    // 1. 卡片 2px 倒角外框与立体阴影
+    display.draw_chamfer_card(x, y, w, h, 2);
+
+    // 2. 顶部结构化标题栏 (高 24px + 2px 分割线)
+    display.fill_rect(x + 2, y + 2, w.saturating_sub(4), 24, BinaryColor::Off);
+    display.fill_rect(x + 2, y + 26, w.saturating_sub(4), 2, BinaryColor::On);
+
+    draw_square_radar_icon(x + 10, y + 7, BinaryColor::On, display);
+    draw_micro_pixel_str("CODEX", x + 30, y + 8, 2, 2, BinaryColor::On, 2, display);
+    draw_text(title_font, "重置雷达", x + 94, y + 20, display)?;
     visible.push("重置雷达".into());
 
     // 3. 右侧状态徽标
@@ -636,34 +744,22 @@ fn draw_modern_reset_radar(
 
     let status_chars = status_text.chars().count() as u32;
     let badge_w = if is_highlight && matches!(radar, RadarDisplayState::ActiveWatch { .. }) {
-        status_chars * 13 + 26
+        status_chars * 13 + 28
     } else {
         status_chars * 13 + 16
     }
-    .clamp(60, 160);
+    .clamp(68, 160);
 
-    let badge_x = x + (w as i32) - (badge_w as i32) - 8;
+    let badge_x = x + w_i32 - (badge_w as i32) - 8;
     if is_highlight {
-        draw_rounded_box(
-            badge_x,
-            y + 8,
-            badge_w,
-            20,
-            3,
-            None,
-            Some(BinaryColor::On),
-            display,
-        );
+        display.fill_rect(badge_x, y + 5, badge_w, 18, BinaryColor::On);
         if matches!(radar, RadarDisplayState::ActiveWatch { .. }) {
-            // 在胶囊左侧画一个精致的实心小白点
-            Circle::new(Point::new(badge_x + 8, y + 15), 5)
-                .draw_styled(&PrimitiveStyle::with_fill(BinaryColor::Off), display)
-                .unwrap();
+            display.fill_rect(badge_x + 6, y + 11, 6, 6, BinaryColor::Off);
             draw_text_color(
                 body_font,
                 status_text,
                 badge_x + 18,
-                y + 23,
+                y + 19,
                 BinaryColor::Off,
                 display,
             )?;
@@ -672,38 +768,26 @@ fn draw_modern_reset_radar(
                 body_font,
                 status_text,
                 badge_x + (badge_w as i32) / 2,
-                y + 23,
+                y + 19,
                 HorizontalAlignment::Center,
                 BinaryColor::Off,
                 display,
             )?;
         }
     } else {
-        draw_rounded_box(
-            badge_x,
-            y + 8,
-            badge_w,
-            20,
-            3,
-            Some(BinaryColor::On),
-            None,
-            display,
-        );
+        display.stroke_rect(badge_x, y + 5, badge_w, 18, 1, BinaryColor::On);
         draw_text_aligned(
             body_font,
             status_text,
             badge_x + (badge_w as i32) / 2,
-            y + 23,
+            y + 19,
             HorizontalAlignment::Center,
             BinaryColor::On,
             display,
         )?;
     }
 
-    // 4. 点阵横向分割线
-    draw_dotted_hline(x + 8, x + (w as i32) - 8, y + 35, 3, display);
-
-    // 5. 详细内容分派
+    // 4. 详细内容分派
     match radar {
         RadarDisplayState::ActiveWatch {
             forecast_window,
@@ -712,219 +796,628 @@ fn draw_modern_reset_radar(
         } => {
             visible.push(forecast_window.clone());
             let window_text = format!("预测窗口：{forecast_window}");
-            draw_text(body_font, window_text.as_str(), x + 12, y + 51, display)?;
+            let fitted_window = fit_text(body_font, window_text.as_str(), 210);
+            draw_mixed_square_cjk(
+                body_font,
+                fitted_window.as_str(),
+                x + 12,
+                y + 35,
+                BinaryColor::On,
+                display,
+            )?;
 
             if let Some(probability) = reset_chance_percent {
                 visible.push(format!("重置概率 {probability}%"));
+                let num_str = format!("{probability}%");
+                let num_w = block_number_str_width(num_str.as_str(), 9, 15, 2, 2);
+                let num_x = x + w_i32 - 12 - num_w;
+                draw_block_number_str(
+                    num_str.as_str(),
+                    num_x,
+                    y + 33,
+                    9,
+                    15,
+                    2,
+                    2,
+                    false,
+                    BinaryColor::On,
+                    display,
+                );
                 draw_text_aligned(
                     body_font,
                     "重置概率",
-                    x + (w as i32) - 52,
-                    y + 51,
-                    HorizontalAlignment::Right,
-                    BinaryColor::On,
-                    display,
-                )?;
-                let num_str = format!("{probability}%");
-                draw_text_aligned(
-                    en_bold_font,
-                    num_str.as_str(),
-                    x + (w as i32) - 10,
-                    y + 51,
+                    num_x - 8,
+                    y + 46,
                     HorizontalAlignment::Right,
                     BinaryColor::On,
                     display,
                 )?;
 
-                // 正式高精度概率进度条（连续平滑填充）
+                // 20 格高精度方块矩阵概率进度条
                 let gauge_start_x = x + 12;
-                let gauge_y = y + 62;
+                let gauge_y = y + 56;
                 let gauge_total_w = w.saturating_sub(24);
-                let gauge_h = 11;
+                let gauge_h = 14;
 
-                draw_formal_progress_bar(
+                draw_segmented_gauge(
                     *probability,
                     gauge_start_x,
                     gauge_y,
                     gauge_total_w,
                     gauge_h,
-                    true,
+                    20,
                     display,
                 );
 
-                // 底部 0% - 50% - 100% 极小刻度标尺
-                draw_text(en_micro_font, "0%", gauge_start_x, y + 87, display)?;
-                draw_text_aligned(
-                    en_micro_font,
-                    "50%",
-                    gauge_start_x + (gauge_total_w as i32) / 2,
-                    y + 87,
-                    HorizontalAlignment::Center,
+                // 底部 0% - 50% - 100% 像素方块刻度标尺
+                draw_micro_pixel_str(
+                    "0%",
+                    gauge_start_x,
+                    y + 78,
+                    1,
+                    1,
                     BinaryColor::On,
+                    1,
                     display,
-                )?;
-                draw_text_aligned(
-                    en_micro_font,
+                );
+                draw_micro_pixel_str(
+                    "50%",
+                    gauge_start_x + (gauge_total_w as i32) / 2 - 9,
+                    y + 78,
+                    1,
+                    1,
+                    BinaryColor::On,
+                    1,
+                    display,
+                );
+                draw_micro_pixel_str(
                     "100%",
-                    gauge_start_x + gauge_total_w as i32,
-                    y + 87,
+                    gauge_start_x + (gauge_total_w as i32) - 23,
+                    y + 78,
+                    1,
+                    1,
+                    BinaryColor::On,
+                    1,
+                    display,
+                );
+            } else {
+                draw_text_aligned(
+                    body_font,
+                    "概率未提供",
+                    x + w_i32 - 12,
+                    y + 46,
                     HorizontalAlignment::Right,
                     BinaryColor::On,
                     display,
                 )?;
-            } else {
-                draw_text(
-                    body_font,
-                    "概率未提供",
-                    x + (w as i32) - 120,
-                    y + 51,
-                    display,
-                )?;
                 visible.push("概率未提供".into());
+                draw_segmented_gauge(0, x + 12, y + 56, w.saturating_sub(24), 14, 20, display);
             }
         }
         RadarDisplayState::Confirmed { .. } => {
-            draw_rounded_box(
-                x + 12,
-                y + 44,
-                w.saturating_sub(24),
-                46,
-                3,
-                Some(BinaryColor::On),
-                None,
-                display,
-            );
-            // 绘制勾选徽标
-            draw_check_icon(x + 24, y + 55, display);
-            draw_text(title_font, "公开重置已记录", x + 40, y + 64, display)?;
-            draw_text(body_font, "个人额度以实际查询为准", x + 24, y + 81, display)?;
+            display.stroke_rect(x + 12, y + 36, w.saturating_sub(24), 54, 1, BinaryColor::On);
+            display.fill_sparse_dots(x + 14, y + 38, 36, 50);
+            draw_square_check_icon(x + 24, y + 55, BinaryColor::On, display);
+            draw_text(title_font, "公开重置已记录", x + 60, y + 56, display)?;
+            draw_text(body_font, "个人额度以实际查询为准", x + 60, y + 77, display)?;
         }
         RadarDisplayState::NoActiveWatch => {
-            draw_text_aligned(
-                body_font,
-                "额度按上方窗口时间重置",
-                x + (w as i32) / 2,
-                y + 68,
-                HorizontalAlignment::Center,
-                BinaryColor::On,
-                display,
-            )?;
+            display.stroke_rect(x + 12, y + 36, w.saturating_sub(24), 54, 1, BinaryColor::On);
+            display.fill_sparse_dots(x + 14, y + 38, 36, 50);
+            display.fill_rect(x + 23, y + 54, 17, 17, BinaryColor::Off);
+            draw_square_clock_icon(x + 25, y + 56, BinaryColor::On, display);
+            draw_text(body_font, "当前无公共重置预警信号", x + 60, y + 55, display)?;
+            draw_text(body_font, "额度按上方窗口时间重置", x + 60, y + 77, display)?;
         }
         RadarDisplayState::Unavailable => {
-            draw_text_aligned(
-                body_font,
-                "下次轮询重试",
-                x + (w as i32) / 2,
-                y + 68,
-                HorizontalAlignment::Center,
-                BinaryColor::On,
-                display,
-            )?;
+            display.stroke_rect(x + 12, y + 36, w.saturating_sub(24), 54, 1, BinaryColor::On);
+            display.fill_sparse_dots(x + 14, y + 38, 36, 50);
+            display.fill_rect(x + 23, y + 54, 17, 17, BinaryColor::Off);
+            display.fill_rect(x + 25, y + 56, 13, 13, BinaryColor::On);
+            display.fill_rect(x + 30, y + 58, 3, 5, BinaryColor::Off);
+            display.fill_rect(x + 30, y + 65, 3, 2, BinaryColor::Off);
+            draw_text(body_font, "公共重置雷达暂不可用", x + 60, y + 55, display)?;
+            draw_text(body_font, "下次轮询重试", x + 60, y + 77, display)?;
         }
     }
 
     Ok(())
 }
 
-/// 绘制正式、高精度的工业级进度条（支持内圆角滑块与微刻度标尺）
-fn draw_formal_progress_bar(
+/// 绘制多格工业方块矩阵进度条（支持墨水屏稀疏网点底纹与微刻度标尺）
+fn draw_segmented_gauge(
     percent: u8,
     x: i32,
     y: i32,
     w: u32,
     h: u32,
-    show_sub_ticks: bool,
+    segments: u32,
     display: &mut FrameDisplay,
 ) {
-    let radius = (h / 2).min(3);
-    // 1. 外框轨道（圆角矩形）
-    draw_rounded_box(x, y, w, h, radius, Some(BinaryColor::On), None, display);
-
-    // 2. 内部填充滑块（严格按照真实百分比连续精确填充）
+    display.stroke_rect(x, y, w, h, 1, BinaryColor::On);
+    let inner_x = x + 2;
+    let inner_y = y + 2;
     let inner_w = w.saturating_sub(4);
     let inner_h = h.saturating_sub(4);
-    let safe_percent = percent.min(100);
-    let fill_w = if safe_percent == 0 {
-        0
-    } else {
-        ((inner_w * u32::from(safe_percent)) / 100).max(2)
-    };
+    let seg_count = segments.max(1);
+    let gap = 2_u32;
+    let total_gaps = gap * seg_count.saturating_sub(1);
+    let seg_w = inner_w.saturating_sub(total_gaps) / seg_count;
+    let rem_w = inner_w.saturating_sub(seg_w * seg_count + total_gaps);
 
-    if fill_w > 0 && inner_h > 0 {
-        let fill_radius = (inner_h / 2).min(2);
-        draw_rounded_box(
-            x + 2,
-            y + 2,
-            fill_w,
-            inner_h,
-            fill_radius,
-            None,
-            Some(BinaryColor::On),
-            display,
-        );
+    let safe_pct = u32::from(percent.min(100));
+    let total_fill_px = (inner_w * safe_pct) / 100;
+
+    let mut cur_x = inner_x;
+    for i in 0..seg_count {
+        let sw = seg_w + u32::from(i < rem_w);
+        let seg_start = (cur_x - inner_x) as u32;
+        let seg_end = seg_start + sw;
+        if total_fill_px >= seg_end {
+            display.fill_rect(cur_x, inner_y, sw, inner_h, BinaryColor::On);
+        } else if total_fill_px > seg_start {
+            let fill_part = total_fill_px - seg_start;
+            display.fill_rect(cur_x, inner_y, fill_part, inner_h, BinaryColor::On);
+            display.fill_sparse_dots(
+                cur_x + fill_part as i32,
+                inner_y,
+                sw - fill_part,
+                inner_h,
+            );
+        } else {
+            display.fill_sparse_dots(cur_x, inner_y, sw, inner_h);
+        }
+        cur_x += (sw + gap) as i32;
     }
 
-    // 3. 正式标尺刻度线 (0%, 50%, 100% 及可选 25%, 75%)
-    let tick_y = y + (h as i32) + 2;
-    // 0% 刻度
-    Line::new(Point::new(x + 2, tick_y), Point::new(x + 2, tick_y + 2))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-    // 50% 刻度
-    let mid_x = x + (w as i32) / 2;
-    Line::new(Point::new(mid_x, tick_y), Point::new(mid_x, tick_y + 2))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-    // 100% 刻度
-    let end_x = x + (w as i32) - 3;
-    Line::new(Point::new(end_x, tick_y), Point::new(end_x, tick_y + 2))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-
-    if show_sub_ticks {
-        // 25% 刻度
-        let q1_x = x + (w as i32) / 4;
-        display.draw_pixel(q1_x, tick_y, BinaryColor::On);
-        // 75% 刻度
-        let q3_x = x + ((w as i32) * 3) / 4;
-        display.draw_pixel(q3_x, tick_y, BinaryColor::On);
+    // 底部 0%, 25%, 50%, 75%, 100% 刻度线
+    let tick_y = y + (h as i32) + 1;
+    let w_span = w.saturating_sub(1) as i32;
+    for (num, den, tall) in [(0, 4, true), (1, 4, false), (2, 4, true), (3, 4, false), (4, 4, true)]
+    {
+        let tx = x + (w_span * num) / den;
+        let th = if tall { 3 } else { 2 };
+        display.fill_rect(tx, tick_y, 1, th, BinaryColor::On);
     }
 }
 
-/// 绘制圆角矩形
+/// 7 段几何方块数字段位表 (A, B, C, D, E, F, G)
+fn digit_segments(ch: char) -> Option<[bool; 7]> {
+    match ch {
+        '0' => Some([true, true, true, true, true, true, false]),
+        '1' => Some([false, true, true, false, false, false, false]),
+        '2' => Some([true, true, false, true, true, false, true]),
+        '3' => Some([true, true, true, true, false, false, true]),
+        '4' => Some([false, true, true, false, false, true, true]),
+        '5' => Some([true, false, true, true, false, true, true]),
+        '6' => Some([true, false, true, true, true, true, true]),
+        '7' => Some([true, true, true, false, false, false, false]),
+        '8' => Some([true, true, true, true, true, true, true]),
+        '9' => Some([true, true, true, true, false, true, true]),
+        _ => None,
+    }
+}
+
+/// 绘制硬朗几何方块数字（支持墨水屏半色调立体阴影与 1px 外倒角）
 #[allow(clippy::too_many_arguments)]
-fn draw_rounded_box(
+fn draw_block_digit(
+    ch: char,
     x: i32,
     y: i32,
     w: u32,
     h: u32,
-    radius: u32,
-    stroke_color: Option<BinaryColor>,
-    fill_color: Option<BinaryColor>,
+    t: u32,
+    shadow: bool,
+    color: BinaryColor,
     display: &mut FrameDisplay,
 ) {
-    let mut style = PrimitiveStyleBuilder::new();
-    if let Some(stroke) = stroke_color {
-        style = style.stroke_color(stroke).stroke_width(1);
-    }
-    if let Some(fill) = fill_color {
-        style = style.fill_color(fill);
-    }
-    RoundedRectangle::new(
-        Rectangle::new(Point::new(x, y), Size::new(w, h)),
-        CornerRadii::new(Size::new(radius, radius)),
-    )
-    .draw_styled(&style.build(), display)
-    .unwrap();
-}
+    let Some([a, b, c, d, e, f, g]) = digit_segments(ch) else {
+        return;
+    };
+    let w_i32 = w as i32;
+    let h_i32 = h as i32;
+    let t_i32 = t as i32;
+    let mid_y = y + (h_i32 - t_i32) / 2;
+    let half_h = ((h_i32 - t_i32) / 2) as u32;
 
-/// 绘制点阵横线（step 控制点阵疏密，如 2 或 3）
-fn draw_dotted_hline(x_start: i32, x_end: i32, y: i32, step: i32, display: &mut FrameDisplay) {
-    for x in x_start..=x_end {
-        if x % step == 0 {
-            display.draw_pixel(x, y, BinaryColor::On);
+    if ch == '1' {
+        let bar_x = x + (w_i32 - t_i32) / 2 + i32::from(w >= 12);
+        let beak_w = t.saturating_sub(1).max(2);
+        let foot_w = (t + 2 * beak_w).min(w);
+        let foot_x = (bar_x - beak_w as i32).max(x);
+        let rects = [
+            (bar_x - beak_w as i32, y + i32::from(h >= 14), beak_w, t),
+            (bar_x, y, t, h),
+            (foot_x, y + h_i32 - t_i32, foot_w, t),
+        ];
+        if shadow && color == BinaryColor::On {
+            for (rx, ry, rw, rh) in rects {
+                display.fill_halftone(rx + 2, ry + 2, rw, rh, 2);
+            }
+        }
+        for (rx, ry, rw, rh) in rects {
+            display.fill_rect(rx, ry, rw, rh, color);
+        }
+        return;
+    }
+
+    let mut rects = Vec::with_capacity(7);
+    if a {
+        rects.push((x, y, w, t));
+    }
+    if d {
+        rects.push((x, y + h_i32 - t_i32, w, t));
+    }
+    if g {
+        rects.push((x, mid_y, w, t));
+    }
+    if f {
+        rects.push((x, y, t, half_h + t));
+    }
+    if b {
+        rects.push((x + w_i32 - t_i32, y, t, half_h + t));
+    }
+    let lower_h = (h_i32 - (mid_y - y)) as u32;
+    if e {
+        rects.push((x, mid_y, t, lower_h));
+    }
+    if c {
+        rects.push((x + w_i32 - t_i32, mid_y, t, lower_h));
+    }
+
+    if shadow && color == BinaryColor::On {
+        for &(rx, ry, rw, rh) in &rects {
+            display.fill_halftone(rx + 2, ry + 2, rw, rh, 2);
         }
     }
+    for (rx, ry, rw, rh) in rects {
+        display.fill_rect(rx, ry, rw, rh, color);
+    }
+
+    if w >= 10 {
+        let inv = if color == BinaryColor::On {
+            BinaryColor::Off
+        } else {
+            BinaryColor::On
+        };
+        if a && f {
+            display.draw_pixel(x, y, inv);
+        }
+        if a && b {
+            display.draw_pixel(x + w_i32 - 1, y, inv);
+        }
+        if d && e {
+            display.draw_pixel(x, y + h_i32 - 1, inv);
+        }
+        if d && c {
+            display.draw_pixel(x + w_i32 - 1, y + h_i32 - 1, inv);
+        }
+    }
+}
+
+/// 绘制几何方块百分号 `%`
+fn draw_block_percent(
+    x: i32,
+    y: i32,
+    size: u32,
+    t: u32,
+    color: BinaryColor,
+    display: &mut FrameDisplay,
+) {
+    let dot = (size / 3).max(t + 1);
+    let size_i32 = size as i32;
+    let dot_i32 = dot as i32;
+    display.fill_rect(x, y, dot, dot, color);
+    display.fill_rect(x + size_i32 - dot_i32, y + size_i32 - dot_i32, dot, dot, color);
+    let steps = size.saturating_sub(2) as i32;
+    let half_t = (t / 2) as i32;
+    for i in 0..steps {
+        let px = x + 1 + i;
+        let py = y + size_i32 - 2 - i;
+        display.fill_rect(px, py - half_t, t, t, color);
+    }
+}
+
+/// 计算方块数字字符串渲染宽度
+fn block_number_str_width(text: &str, dw: u32, dh: u32, dt: u32, gap: i32) -> i32 {
+    let mut width = 0_i32;
+    for ch in text.chars() {
+        let w = if ch.is_ascii_digit() {
+            dw as i32
+        } else if ch == ':' {
+            dt.max(2) as i32 + 2
+        } else if ch == '-' {
+            dw.saturating_sub(2).max(4) as i32
+        } else if ch == '%' {
+            dh.saturating_sub(2).max(8) as i32
+        } else {
+            (dw / 2) as i32
+        };
+        width += w + gap;
+    }
+    (width - gap).max(0)
+}
+
+/// 绘制方块数字与符号串 (`0-9`, `:`, `-`, `%`)
+#[allow(clippy::too_many_arguments)]
+fn draw_block_number_str(
+    text: &str,
+    x: i32,
+    y: i32,
+    dw: u32,
+    dh: u32,
+    dt: u32,
+    gap: i32,
+    shadow: bool,
+    color: BinaryColor,
+    display: &mut FrameDisplay,
+) -> i32 {
+    let mut cx = x;
+    let dh_i32 = dh as i32;
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            draw_block_digit(ch, cx, y, dw, dh, dt, shadow, color, display);
+            cx += (dw as i32) + gap;
+        } else if ch == ':' {
+            let dot = dt.max(2);
+            let dot_i32 = dot as i32;
+            display.fill_rect(cx + 1, y + dh_i32 / 4, dot, dot, color);
+            display.fill_rect(cx + 1, y + (dh_i32 * 3) / 4 - dot_i32, dot, dot, color);
+            cx += dot_i32 + 2 + gap;
+        } else if ch == '-' {
+            let mw = dw.saturating_sub(2).max(4);
+            display.fill_rect(cx, y + (dh_i32 - dt as i32) / 2, mw, dt, color);
+            cx += (mw as i32) + gap;
+        } else if ch == '%' {
+            let psize = dh.saturating_sub(2).max(8);
+            draw_block_percent(
+                cx,
+                y + (dh_i32 - psize as i32),
+                psize,
+                dt.saturating_sub(1).max(2),
+                color,
+                display,
+            );
+            cx += (psize as i32) + gap;
+        } else {
+            cx += (dw as i32) / 2 + gap;
+        }
+    }
+    cx - x
+}
+
+/// 5x7 像素点阵字库（用于品牌铭牌 CODEX 与标尺刻度 0% / 50% / 100%）
+fn micro_pixel_glyph(ch: char) -> [u8; 7] {
+    match ch.to_ascii_uppercase() {
+        '0' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+        '2' => [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111],
+        '5' => [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
+        '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
+        '%' => [0b11001, 0b11010, 0b00100, 0b00100, 0b01011, 0b10011, 0b00000],
+        'C' => [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111],
+        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
+        'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+        'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
+        _ => [0; 7],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_micro_pixel_str(
+    text: &str,
+    x: i32,
+    y: i32,
+    scale_x: u32,
+    scale_y: u32,
+    color: BinaryColor,
+    gap: i32,
+    display: &mut FrameDisplay,
+) -> i32 {
+    let mut cx = x;
+    for ch in text.chars() {
+        let rows = micro_pixel_glyph(ch);
+        for (ry, row) in rows.iter().enumerate() {
+            for rx in 0..5_u32 {
+                if ((row >> (4 - rx)) & 1) == 1 {
+                    display.fill_rect(
+                        cx + (rx * scale_x) as i32,
+                        y + (ry as u32 * scale_y) as i32,
+                        scale_x,
+                        scale_y,
+                        color,
+                    );
+                }
+            }
+        }
+        cx += (5 * scale_x) as i32 + gap;
+    }
+    cx - x
+}
+
+/// 绘制窗口标签（自动将前导数字转为方块字，中文保持点阵）
+fn draw_window_tab_title(
+    font: &FontRenderer,
+    name: &str,
+    center_x: i32,
+    y_top: i32,
+    color: BinaryColor,
+    display: &mut FrameDisplay,
+) -> Result<(), DashboardError> {
+    if let Some((num_s, unit_s)) = name.split_once(' ')
+        && !num_s.is_empty()
+        && num_s.chars().all(|c| c.is_ascii_digit())
+    {
+        let num_w = block_number_str_width(num_s, 7, 12, 2, 2);
+        let unit_w = font
+            .get_rendered_dimensions(unit_s, Point::zero(), VerticalPosition::Baseline)
+            .map(|d| d.advance.x)
+            .unwrap_or((unit_s.chars().count() as i32) * 13);
+        let total_w = num_w + 4 + unit_w;
+        let start_x = center_x - total_w / 2;
+        draw_block_number_str(num_s, start_x, y_top, 7, 12, 2, 2, false, color, display);
+        draw_text_color(font, unit_s, start_x + num_w + 4, y_top + 11, color, display)?;
+        return Ok(());
+    }
+    draw_text_aligned(
+        font,
+        name,
+        center_x,
+        y_top + 11,
+        HorizontalAlignment::Center,
+        color,
+        display,
+    )
+}
+
+/// 混合渲染中英文与方块数字（所有数字自动使用几何方块数字，中文使用点阵字）
+fn draw_mixed_square_cjk(
+    font: &FontRenderer,
+    text: &str,
+    x: i32,
+    y_top: i32,
+    color: BinaryColor,
+    display: &mut FrameDisplay,
+) -> Result<i32, DashboardError> {
+    let mut cx = x;
+    let mut idx = 0;
+    let bytes = text.as_bytes();
+    while idx < bytes.len() {
+        if bytes[idx].is_ascii_digit() {
+            let start = idx;
+            while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                idx += 1;
+            }
+            let num_slice = &text[start..idx];
+            let nw = draw_block_number_str(num_slice, cx, y_top, 7, 13, 2, 2, false, color, display);
+            cx += nw + 1;
+        } else {
+            let start = idx;
+            while idx < bytes.len() && !bytes[idx].is_ascii_digit() {
+                idx += 1;
+            }
+            let seg = &text[start..idx];
+            let trimmed = seg.trim_matches(' ');
+            if seg.starts_with(' ') {
+                cx += 2;
+            }
+            if !trimmed.is_empty() {
+                draw_text_color(font, trimmed, cx, y_top + 11, color, display)?;
+                let w = font
+                    .get_rendered_dimensions(trimmed, Point::zero(), VerticalPosition::Baseline)
+                    .map(|d| d.advance.x)
+                    .unwrap_or((trimmed.chars().count() as i32) * 13);
+                cx += w;
+            }
+            if seg.ends_with(' ') {
+                cx += 2;
+            }
+        }
+    }
+    Ok(cx - x)
+}
+
+/// 绘制精确重置时间戳（5小时等短期窗口：`MM月DD日 HH:MM`；7天等长周期窗口：`YYYY年MM月DD日 HH时`）
+fn draw_exact_reset_timestamp(
+    body_font: &FontRenderer,
+    is_long: bool,
+    resets_at_epoch_seconds: i64,
+    x: i32,
+    y_top: i32,
+    large_single: bool,
+    display: &mut FrameDisplay,
+) -> Result<(), DashboardError> {
+    let Some(utc_dt) = DateTime::<Utc>::from_timestamp(resets_at_epoch_seconds, 0) else {
+        draw_text(body_font, "时间未知", x, y_top + 11, display)?;
+        return Ok(());
+    };
+    let local_dt = utc_dt.with_timezone(&Local);
+    let mut cx = x;
+
+    if !is_long {
+        let (dw, dh, dt_bar) = if large_single {
+            (8, 15, 2)
+        } else {
+            (7, 13, 2)
+        };
+        let date_parts = [
+            (format!("{:02}", local_dt.month()), "月"),
+            (format!("{:02}", local_dt.day()), "日"),
+        ];
+        for (num_s, unit_s) in date_parts {
+            let w_n = draw_block_number_str(
+                num_s.as_str(),
+                cx,
+                y_top + 1,
+                dw,
+                dh,
+                dt_bar,
+                2,
+                false,
+                BinaryColor::On,
+                display,
+            );
+            cx += w_n;
+            draw_text(body_font, unit_s, cx, y_top + 12, display)?;
+            cx += 14;
+        }
+        cx += 2;
+        let hh_mm = format!("{:02}:{:02}", local_dt.hour(), local_dt.minute());
+        draw_block_number_str(
+            hh_mm.as_str(),
+            cx,
+            y_top + 1,
+            dw,
+            dh,
+            dt_bar,
+            2,
+            false,
+            BinaryColor::On,
+            display,
+        );
+    } else {
+        let (dw, dh, dt_bar) = if large_single { (8, 15, 2) } else { (7, 13, 2) };
+        let parts = [
+            (format!("{:04}", local_dt.year()), "年"),
+            (format!("{:02}", local_dt.month()), "月"),
+            (format!("{:02}", local_dt.day()), "日"),
+        ];
+        for (num_s, unit_s) in parts {
+            let w_n = draw_block_number_str(
+                num_s.as_str(),
+                cx,
+                y_top + 1,
+                dw,
+                dh,
+                dt_bar,
+                2,
+                false,
+                BinaryColor::On,
+                display,
+            );
+            cx += w_n;
+            draw_text(body_font, unit_s, cx, y_top + 12, display)?;
+            cx += 14;
+        }
+        cx += 2;
+        let hour_s = format!("{:02}", local_dt.hour());
+        let w_h = draw_block_number_str(
+            hour_s.as_str(),
+            cx,
+            y_top + 1,
+            dw,
+            dh,
+            dt_bar,
+            2,
+            false,
+            BinaryColor::On,
+            display,
+        );
+        cx += w_h;
+        draw_text(body_font, "时", cx, y_top + 12, display)?;
+    }
+    Ok(())
 }
 
 /// 绘制点阵竖线
@@ -936,83 +1429,129 @@ fn draw_dotted_vline(x: i32, y_start: i32, y_end: i32, step: i32, display: &mut 
     }
 }
 
-/// 绘制微型勾选图标 (10x10)
-fn draw_check_icon(x: i32, y: i32, display: &mut FrameDisplay) {
-    Line::new(Point::new(x, y + 5), Point::new(x + 3, y + 8))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 2), display)
-        .unwrap();
-    Line::new(Point::new(x + 3, y + 8), Point::new(x + 9, y + 2))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 2), display)
-        .unwrap();
+/// 绘制方块勾选图标 (15x15)
+fn draw_square_check_icon(x: i32, y: i32, color: BinaryColor, display: &mut FrameDisplay) {
+    let inv = if color == BinaryColor::On {
+        BinaryColor::Off
+    } else {
+        BinaryColor::On
+    };
+    display.fill_rect(x - 1, y - 1, 17, 17, inv);
+    display.fill_rect(x, y, 15, 15, color);
+    for (cx, cy) in [(x, y), (x + 14, y), (x, y + 14), (x + 14, y + 14)] {
+        display.draw_pixel(cx, cy, inv);
+    }
+    for (dx, dy) in [
+        (3, 7),
+        (4, 8),
+        (5, 9),
+        (6, 10),
+        (7, 9),
+        (8, 8),
+        (9, 7),
+        (10, 6),
+        (11, 5),
+        (12, 4),
+    ] {
+        display.fill_rect(x + dx, y + dy, 2, 2, inv);
+    }
 }
 
-/// 绘制像素级精致时钟图标 (11x11)
-fn draw_clock_icon(x: i32, y: i32, display: &mut FrameDisplay) {
-    Circle::new(Point::new(x, y), 11)
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-    // 中心点与指针
-    display.draw_pixel(x + 5, y + 5, BinaryColor::On);
-    // 时针向 12 点
-    Line::new(Point::new(x + 5, y + 5), Point::new(x + 5, y + 2))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-    // 分针向 3 点
-    Line::new(Point::new(x + 5, y + 5), Point::new(x + 8, y + 5))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
+/// 绘制像素级硬朗方块时钟图标 (13x13)
+fn draw_square_clock_icon(x: i32, y: i32, color: BinaryColor, display: &mut FrameDisplay) {
+    let inv = if color == BinaryColor::On {
+        BinaryColor::Off
+    } else {
+        BinaryColor::On
+    };
+    display.fill_rect(x, y, 13, 13, inv);
+    display.stroke_rect(x, y, 13, 13, 2, color);
+    for (cx, cy) in [(x, y), (x + 12, y), (x, y + 12), (x + 12, y + 12)] {
+        display.draw_pixel(cx, cy, inv);
+    }
+    display.fill_rect(x + 6, y + 3, 2, 4, color);
+    display.fill_rect(x + 6, y + 6, 4, 2, color);
 }
 
-/// 绘制高识别度科技感 HUD 雷达图标 (15x15)
-fn draw_radar_icon(x: i32, y: i32, display: &mut FrameDisplay) {
-    // 外圈雷达轮廓
-    Circle::new(Point::new(x, y), 15)
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-    // 内圈距离刻度圈
-    Circle::new(Point::new(x + 3, y + 3), 9)
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-    // 中心发射源实心点
-    Circle::new(Point::new(x + 6, y + 6), 3)
-        .draw_styled(&PrimitiveStyle::with_fill(BinaryColor::On), display)
-        .unwrap();
-    // 扫描波指针线（向右上）
-    Line::new(Point::new(x + 7, y + 7), Point::new(x + 12, y + 3))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-    // 十字刻度线
-    Line::new(Point::new(x + 7, y), Point::new(x + 7, y + 2))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-    Line::new(Point::new(x + 7, y + 12), Point::new(x + 7, y + 14))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-    Line::new(Point::new(x, y + 7), Point::new(x + 2, y + 7))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
-    Line::new(Point::new(x + 12, y + 7), Point::new(x + 14, y + 7))
-        .draw_styled(&PrimitiveStyle::with_stroke(BinaryColor::On, 1), display)
-        .unwrap();
+/// 绘制高识别度工业 HUD 方块雷达图标 (15x15)
+fn draw_square_radar_icon(x: i32, y: i32, color: BinaryColor, display: &mut FrameDisplay) {
+    let inv = if color == BinaryColor::On {
+        BinaryColor::Off
+    } else {
+        BinaryColor::On
+    };
+    display.stroke_rect(x, y, 15, 15, 2, color);
+    for (cx, cy) in [(x, y), (x + 14, y), (x, y + 14), (x + 14, y + 14)] {
+        display.draw_pixel(cx, cy, inv);
+    }
+    display.stroke_rect(x + 4, y + 4, 7, 7, 1, color);
+    display.fill_rect(x + 6, y + 6, 3, 3, color);
+    display.fill_rect(x + 7, y + 2, 1, 2, color);
+    display.fill_rect(x + 7, y + 11, 1, 2, color);
+    display.fill_rect(x + 2, y + 7, 2, 1, color);
+    display.fill_rect(x + 11, y + 7, 2, 1, color);
 }
 
+/// 判断是否为多日长周期（如 7 天窗口）
+pub(crate) fn is_long_quota_window(
+    window_name: &str,
+    resets_at_epoch_seconds: i64,
+    now_epoch_seconds: i64,
+) -> bool {
+    let lower = window_name.to_ascii_lowercase();
+    if window_name.contains('天')
+        || window_name.contains('周')
+        || window_name.contains('日')
+        || lower.contains("day")
+        || lower.contains("week")
+        || lower.contains("7d")
+    {
+        return true;
+    }
+    if window_name.contains("小时")
+        || window_name.contains('分')
+        || lower.contains("hour")
+        || lower.contains("5h")
+    {
+        return false;
+    }
+    resets_at_epoch_seconds.saturating_sub(now_epoch_seconds) > 24 * 60 * 60
+}
+
+/// 按窗口类型生成精确本地重置时间标签：
+/// - 5小时等短期窗口：`重置 MM月DD日 HH:MM`
+/// - 7天等长周期窗口：`重置 YYYY年MM月DD日 HH时`
+pub(crate) fn quota_window_reset_label(
+    window_name: &str,
+    resets_at_epoch_seconds: i64,
+    now_epoch_seconds: i64,
+) -> String {
+    let Some(utc_dt) = DateTime::<Utc>::from_timestamp(resets_at_epoch_seconds, 0) else {
+        return "重置 时间未知".into();
+    };
+    let local_dt = utc_dt.with_timezone(&Local);
+    if is_long_quota_window(window_name, resets_at_epoch_seconds, now_epoch_seconds) {
+        format!(
+            "重置 {:04}年{:02}月{:02}日 {:02}时",
+            local_dt.year(),
+            local_dt.month(),
+            local_dt.day(),
+            local_dt.hour()
+        )
+    } else {
+        format!(
+            "重置 {:02}月{:02}日 {:02}:{:02}",
+            local_dt.month(),
+            local_dt.day(),
+            local_dt.hour(),
+            local_dt.minute()
+        )
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) fn quota_reset_label(resets_at_epoch_seconds: i64, now_epoch_seconds: i64) -> String {
-    let seconds = resets_at_epoch_seconds
-        .saturating_sub(now_epoch_seconds)
-        .max(0);
-    let total_minutes = (seconds + 59) / 60;
-    let days = total_minutes / 1_440;
-    let hours = total_minutes % 1_440 / 60;
-    let minutes = total_minutes % 60;
-    let mut parts = Vec::new();
-    if days > 0 {
-        parts.push(format!("{days}天"));
-    }
-    if days > 0 || hours > 0 {
-        parts.push(format!("{hours}小时"));
-    }
-    parts.push(format!("{minutes}分"));
-    format!("重置 {}", parts.join(" "))
+    quota_window_reset_label("", resets_at_epoch_seconds, now_epoch_seconds)
 }
 
 fn draw_text<F: u8g2_fonts::Content>(
@@ -1101,6 +1640,66 @@ impl FrameDisplay {
         if x >= 0 && y >= 0 && (x as u32) < DISPLAY_WIDTH && (y as u32) < DISPLAY_HEIGHT {
             let index = (y as u32 * DISPLAY_WIDTH + x as u32) as usize;
             self.pixels[index] = if color == BinaryColor::On { 0 } else { 255 };
+        }
+    }
+
+    fn fill_rect(&mut self, x: i32, y: i32, w: u32, h: u32, color: BinaryColor) {
+        for py in y..y.saturating_add(h as i32) {
+            for px in x..x.saturating_add(w as i32) {
+                self.draw_pixel(px, py, color);
+            }
+        }
+    }
+
+    fn stroke_rect(&mut self, x: i32, y: i32, w: u32, h: u32, thickness: u32, color: BinaryColor) {
+        let t = thickness.min(w).min(h);
+        let t_i32 = t as i32;
+        let w_i32 = w as i32;
+        let h_i32 = h as i32;
+        self.fill_rect(x, y, w, t, color);
+        self.fill_rect(x, y + h_i32 - t_i32, w, t, color);
+        self.fill_rect(x, y, t, h, color);
+        self.fill_rect(x + w_i32 - t_i32, y, t, h, color);
+    }
+
+    fn fill_halftone(&mut self, x: i32, y: i32, w: u32, h: u32, step: i32) {
+        let step = step.max(1);
+        for py in y..y.saturating_add(h as i32) {
+            for px in x..x.saturating_add(w as i32) {
+                if (px + py).rem_euclid(step) == 0 {
+                    self.draw_pixel(px, py, BinaryColor::On);
+                }
+            }
+        }
+    }
+
+    fn fill_sparse_dots(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        for py in y..y.saturating_add(h as i32) {
+            for px in x..x.saturating_add(w as i32) {
+                if px.rem_euclid(2) == 0 && py.rem_euclid(2) == 0 {
+                    self.draw_pixel(px, py, BinaryColor::On);
+                }
+            }
+        }
+    }
+
+    fn draw_chamfer_card(&mut self, x: i32, y: i32, w: u32, h: u32, shadow: u32) {
+        let w_i32 = w as i32;
+        let h_i32 = h as i32;
+        if shadow > 0 {
+            let s_i32 = shadow as i32;
+            self.fill_rect(x + s_i32, y + h_i32, w, shadow, BinaryColor::On);
+            self.fill_rect(x + w_i32, y + s_i32, shadow, h, BinaryColor::On);
+        }
+        self.fill_rect(x, y, w, h, BinaryColor::Off);
+        self.stroke_rect(x, y, w, h, 2, BinaryColor::On);
+        for (cx, cy) in [
+            (x, y),
+            (x + w_i32 - 1, y),
+            (x, y + h_i32 - 1),
+            (x + w_i32 - 1, y + h_i32 - 1),
+        ] {
+            self.draw_pixel(cx, cy, BinaryColor::Off);
         }
     }
 }
@@ -1194,7 +1793,7 @@ mod tests {
                                 resets_at_epoch_seconds: now + 86400,
                             },
                         ],
-                        reset_credits: 0,
+                        reset_credits: 2,
                         stale: true,
                     },
                     radar,
@@ -1204,5 +1803,22 @@ mod tests {
             );
             assert!(dual_output.is_ok());
         }
+    }
+
+    #[test]
+    fn formats_5h_and_7d_exact_reset_timestamps() {
+        let now = 1_797_000_000;
+        let label_5h = quota_window_reset_label("5 小时", now + 3 * 3600 + 15 * 60, now);
+        let label_7d = quota_window_reset_label("7 天", now + 4 * 86_400, now);
+
+        assert!(label_5h.starts_with("重置 ") && label_5h.contains(':'));
+        assert!(label_5h.contains('月') && label_5h.contains('日'));
+        assert!(!label_5h.contains('年'));
+        assert!(
+            label_7d.contains('年')
+                && label_7d.contains('月')
+                && label_7d.contains('日')
+                && label_7d.ends_with('时')
+        );
     }
 }

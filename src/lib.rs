@@ -274,7 +274,7 @@ fn draw_dashboard(
         &title_font,
         "配额监控",
         86,
-        24,
+        25,
         BinaryColor::Off,
         &mut display,
     )?;
@@ -289,7 +289,7 @@ fn draw_dashboard(
             &body_font,
             "重置券×",
             165,
-            23,
+            24,
             BinaryColor::Off,
             &mut display,
         )?;
@@ -702,7 +702,7 @@ fn draw_modern_reset_radar(
 
     draw_square_radar_icon(x + 10, y + 7, BinaryColor::On, display);
     draw_micro_pixel_str("CODEX", x + 30, y + 8, 2, 2, BinaryColor::On, 2, display);
-    draw_text(title_font, "重置雷达", x + 94, y + 20, display)?;
+    draw_text(title_font, "重置雷达", x + 94, y + 21, display)?;
     visible.push("重置雷达".into());
 
     // 3. 右侧状态徽标
@@ -1233,14 +1233,14 @@ fn draw_window_tab_title(
         let total_w = num_w + 4 + unit_w;
         let start_x = center_x - total_w / 2;
         draw_block_number_str(num_s, start_x, y_top, 7, 12, 2, 2, false, color, display);
-        draw_text_color(font, unit_s, start_x + num_w + 4, y_top + 11, color, display)?;
+        draw_text_color(font, unit_s, start_x + num_w + 4, y_top + 12, color, display)?;
         return Ok(());
     }
     draw_text_aligned(
         font,
         name,
         center_x,
-        y_top + 11,
+        y_top + 12,
         HorizontalAlignment::Center,
         color,
         display,
@@ -1279,7 +1279,7 @@ fn draw_mixed_square_cjk(
                 cx += 2;
             }
             if !trimmed.is_empty() {
-                draw_text_color(font, trimmed, cx, y_top + 11, color, display)?;
+                draw_text_color(font, trimmed, cx, y_top + 12, color, display)?;
                 let w = font
                     .get_rendered_dimensions(trimmed, Point::zero(), VerticalPosition::Baseline)
                     .map(|d| d.advance.x)
@@ -1335,7 +1335,7 @@ fn draw_exact_reset_timestamp(
             display,
         );
         cx += w_n;
-        draw_text(body_font, unit_s, cx, y_top + 12, display)?;
+        draw_text(body_font, unit_s, cx, y_top + 13, display)?;
         cx += 14;
     }
     cx += 2;

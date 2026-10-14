@@ -533,29 +533,17 @@ fn draw_dual_quota_card(
     );
     visible.push(reset_label);
 
-    if is_long {
-        draw_text(body_font, "周期重置时刻", x + 46, y + 114, display)?;
-        draw_exact_reset_timestamp(
-            body_font,
-            true,
-            window.resets_at_epoch_seconds,
-            x + 10,
-            y + 121,
-            false,
-            display,
-        )?;
-    } else {
-        draw_text(body_font, "窗口重置时刻", x + 46, y + 114, display)?;
-        draw_exact_reset_timestamp(
-            body_font,
-            false,
-            window.resets_at_epoch_seconds,
-            x + 10,
-            y + 121,
-            false,
-            display,
-        )?;
-    }
+    let title_prefix = if is_long { "周期重置时刻" } else { "窗口重置时刻" };
+    draw_text(body_font, title_prefix, x + 46, y + 114, display)?;
+    draw_exact_reset_timestamp(
+        body_font,
+        is_long,
+        window.resets_at_epoch_seconds,
+        x + 10,
+        y + 121,
+        false,
+        display,
+    )?;
 
     Ok(())
 }
@@ -677,27 +665,15 @@ fn draw_single_quota_card(
     );
     visible.push(reset_label);
 
-    if is_long {
-        draw_exact_reset_timestamp(
-            body_font,
-            true,
-            window.resets_at_epoch_seconds,
-            right_x,
-            y + 109,
-            true,
-            display,
-        )?;
-    } else {
-        draw_exact_reset_timestamp(
-            body_font,
-            false,
-            window.resets_at_epoch_seconds,
-            right_x,
-            y + 109,
-            true,
-            display,
-        )?;
-    }
+    draw_exact_reset_timestamp(
+        body_font,
+        is_long,
+        window.resets_at_epoch_seconds,
+        right_x,
+        y + 109,
+        true,
+        display,
+    )?;
 
     Ok(())
 }
@@ -1318,10 +1294,10 @@ fn draw_mixed_square_cjk(
     Ok(cx - x)
 }
 
-/// 绘制精确重置时间戳（5小时等短期窗口：`MM月DD日 HH:MM`；7天等长周期窗口：`YYYY年MM月DD日 HH时`）
+/// 绘制精确重置时间戳（统一格式：`YYYY年MM月DD日 HH:MM`）
 fn draw_exact_reset_timestamp(
     body_font: &FontRenderer,
-    is_long: bool,
+    _is_long: bool,
     resets_at_epoch_seconds: i64,
     x: i32,
     y_top: i32,
@@ -1335,75 +1311,19 @@ fn draw_exact_reset_timestamp(
     let local_dt = utc_dt.with_timezone(&Local);
     let mut cx = x;
 
-    if !is_long {
-        let (dw, dh, dt_bar) = if large_single {
-            (8, 15, 2)
-        } else {
-            (7, 13, 2)
-        };
-        let date_parts = [
-            (format!("{:02}", local_dt.month()), "月"),
-            (format!("{:02}", local_dt.day()), "日"),
-        ];
-        for (num_s, unit_s) in date_parts {
-            let w_n = draw_block_number_str(
-                num_s.as_str(),
-                cx,
-                y_top + 1,
-                dw,
-                dh,
-                dt_bar,
-                2,
-                false,
-                BinaryColor::On,
-                display,
-            );
-            cx += w_n;
-            draw_text(body_font, unit_s, cx, y_top + 12, display)?;
-            cx += 14;
-        }
-        cx += 2;
-        let hh_mm = format!("{:02}:{:02}", local_dt.hour(), local_dt.minute());
-        draw_block_number_str(
-            hh_mm.as_str(),
-            cx,
-            y_top + 1,
-            dw,
-            dh,
-            dt_bar,
-            2,
-            false,
-            BinaryColor::On,
-            display,
-        );
+    let (dw, dh, dt_bar) = if large_single {
+        (8, 15, 2)
     } else {
-        let (dw, dh, dt_bar) = if large_single { (8, 15, 2) } else { (7, 13, 2) };
-        let parts = [
-            (format!("{:04}", local_dt.year()), "年"),
-            (format!("{:02}", local_dt.month()), "月"),
-            (format!("{:02}", local_dt.day()), "日"),
-        ];
-        for (num_s, unit_s) in parts {
-            let w_n = draw_block_number_str(
-                num_s.as_str(),
-                cx,
-                y_top + 1,
-                dw,
-                dh,
-                dt_bar,
-                2,
-                false,
-                BinaryColor::On,
-                display,
-            );
-            cx += w_n;
-            draw_text(body_font, unit_s, cx, y_top + 12, display)?;
-            cx += 14;
-        }
-        cx += 2;
-        let hour_s = format!("{:02}", local_dt.hour());
-        let w_h = draw_block_number_str(
-            hour_s.as_str(),
+        (7, 13, 2)
+    };
+    let date_parts = [
+        (format!("{:04}", local_dt.year()), "年"),
+        (format!("{:02}", local_dt.month()), "月"),
+        (format!("{:02}", local_dt.day()), "日"),
+    ];
+    for (num_s, unit_s) in date_parts {
+        let w_n = draw_block_number_str(
+            num_s.as_str(),
             cx,
             y_top + 1,
             dw,
@@ -1414,9 +1334,25 @@ fn draw_exact_reset_timestamp(
             BinaryColor::On,
             display,
         );
-        cx += w_h;
-        draw_text(body_font, "时", cx, y_top + 12, display)?;
+        cx += w_n;
+        draw_text(body_font, unit_s, cx, y_top + 12, display)?;
+        cx += 14;
     }
+    cx += 2;
+    let hh_mm = format!("{:02}:{:02}", local_dt.hour(), local_dt.minute());
+    draw_block_number_str(
+        hh_mm.as_str(),
+        cx,
+        y_top + 1,
+        dw,
+        dh,
+        dt_bar,
+        2,
+        false,
+        BinaryColor::On,
+        display,
+    );
+
     Ok(())
 }
 
@@ -1493,6 +1429,7 @@ fn draw_square_radar_icon(x: i32, y: i32, color: BinaryColor, display: &mut Fram
 }
 
 /// 判断是否为多日长周期（如 7 天窗口）
+#[allow(dead_code)]
 pub(crate) fn is_long_quota_window(
     window_name: &str,
     resets_at_epoch_seconds: i64,
@@ -1519,34 +1456,24 @@ pub(crate) fn is_long_quota_window(
 }
 
 /// 按窗口类型生成精确本地重置时间标签：
-/// - 5小时等短期窗口：`重置 MM月DD日 HH:MM`
-/// - 7天等长周期窗口：`重置 YYYY年MM月DD日 HH时`
+/// - 统一格式：`重置 YYYY年MM月DD日 HH:MM`
 pub(crate) fn quota_window_reset_label(
-    window_name: &str,
+    _window_name: &str,
     resets_at_epoch_seconds: i64,
-    now_epoch_seconds: i64,
+    _now_epoch_seconds: i64,
 ) -> String {
     let Some(utc_dt) = DateTime::<Utc>::from_timestamp(resets_at_epoch_seconds, 0) else {
         return "重置 时间未知".into();
     };
     let local_dt = utc_dt.with_timezone(&Local);
-    if is_long_quota_window(window_name, resets_at_epoch_seconds, now_epoch_seconds) {
-        format!(
-            "重置 {:04}年{:02}月{:02}日 {:02}时",
-            local_dt.year(),
-            local_dt.month(),
-            local_dt.day(),
-            local_dt.hour()
-        )
-    } else {
-        format!(
-            "重置 {:02}月{:02}日 {:02}:{:02}",
-            local_dt.month(),
-            local_dt.day(),
-            local_dt.hour(),
-            local_dt.minute()
-        )
-    }
+    format!(
+        "重置 {:04}年{:02}月{:02}日 {:02}:{:02}",
+        local_dt.year(),
+        local_dt.month(),
+        local_dt.day(),
+        local_dt.hour(),
+        local_dt.minute()
+    )
 }
 
 #[allow(dead_code)]
@@ -1812,13 +1739,8 @@ mod tests {
         let label_7d = quota_window_reset_label("7 天", now + 4 * 86_400, now);
 
         assert!(label_5h.starts_with("重置 ") && label_5h.contains(':'));
-        assert!(label_5h.contains('月') && label_5h.contains('日'));
-        assert!(!label_5h.contains('年'));
-        assert!(
-            label_7d.contains('年')
-                && label_7d.contains('月')
-                && label_7d.contains('日')
-                && label_7d.ends_with('时')
-        );
+        assert!(label_5h.contains('年') && label_5h.contains('月') && label_5h.contains('日'));
+        assert!(label_7d.starts_with("重置 ") && label_7d.contains(':'));
+        assert!(label_7d.contains('年') && label_7d.contains('月') && label_7d.contains('日'));
     }
 }

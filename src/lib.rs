@@ -1535,6 +1535,7 @@ pub(crate) fn quota_window_reset_label(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn quota_reset_label(resets_at_epoch_seconds: i64, now_epoch_seconds: i64) -> String {
     quota_window_reset_label("", resets_at_epoch_seconds, now_epoch_seconds)
 }

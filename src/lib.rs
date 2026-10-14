@@ -319,7 +319,7 @@ fn draw_dashboard(
             &body_font,
             "额度未更新",
             300,
-            23,
+            24,
             BinaryColor::On,
             &mut display,
         )?;
@@ -332,7 +332,7 @@ fn draw_dashboard(
             &body_font,
             "实时同步",
             326,
-            23,
+            24,
             BinaryColor::Off,
             &mut display,
         )?;

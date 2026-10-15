@@ -394,6 +394,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut quota_deadline = Instant::now();
     let mut radar_deadline = quota_deadline;
     let mut quota_pause_active = false;
+    let mut radar_pause_active = false;
     // 额度连续失败计数：达到上限则记日志自杀，由 systemd 拉起。
     // 可用 QUOTA_MAX_FAIL_STREAK 覆盖，默认 3；暂停窗口内的跳过不计入。
     let max_fail_streak: u64 = env_value("QUOTA_MAX_FAIL_STREAK", "3")
@@ -454,35 +455,47 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
 
         if Instant::now() >= radar_deadline {
-            let mut next_interval = Duration::from_secs(radar_poll_seconds);
-            match radar_client.fetch() {
-                RadarFetch::Modified(parsed) => {
-                    radar_cache.accept(parsed, now);
-                    if write_encrypted(
-                        &radar_cache_path,
-                        radar_cache.semantic(),
-                        &codex.cache_cipher,
-                        RADAR_CACHE_MAGIC,
-                    )
-                    .is_err()
-                    {
+            if let Some(until_resume) = pause_schedule.seconds_until_resume() {
+                if !radar_pause_active {
+                    eprintln!("重置雷达轮询=暂停 TZ={timezone}");
+                    radar_pause_active = true;
+                }
+                radar_deadline = Instant::now() + Duration::from_secs(until_resume.min(60));
+            } else {
+                if radar_pause_active {
+                    eprintln!("重置雷达轮询=恢复 TZ={timezone}");
+                    radar_pause_active = false;
+                }
+                let mut next_interval = Duration::from_secs(radar_poll_seconds);
+                match radar_client.fetch() {
+                    RadarFetch::Modified(parsed) => {
+                        radar_cache.accept(parsed, now);
+                        if write_encrypted(
+                            &radar_cache_path,
+                            radar_cache.semantic(),
+                            &codex.cache_cipher,
+                            RADAR_CACHE_MAGIC,
+                        )
+                        .is_err()
+                        {
+                            radar_cache.mark_failed();
+                            eprintln!("重置雷达缓存=写入失败");
+                        } else {
+                            eprintln!("重置雷达=已更新");
+                        }
+                    }
+                    RadarFetch::NotModified => radar_cache.confirm_unchanged(now),
+                    RadarFetch::Failed {
+                        retry_after_seconds,
+                        ..
+                    } => {
                         radar_cache.mark_failed();
-                        eprintln!("重置雷达缓存=写入失败");
-                    } else {
-                        eprintln!("重置雷达=已更新");
+                        next_interval = Duration::from_secs(retry_after_seconds.unwrap_or(60).max(60));
+                        eprintln!("重置雷达=暂不可用");
                     }
                 }
-                RadarFetch::NotModified => radar_cache.confirm_unchanged(now),
-                RadarFetch::Failed {
-                    retry_after_seconds,
-                    ..
-                } => {
-                    radar_cache.mark_failed();
-                    next_interval = Duration::from_secs(retry_after_seconds.unwrap_or(60).max(60));
-                    eprintln!("重置雷达=暂不可用");
-                }
+                radar_deadline = Instant::now() + next_interval;
             }
-            radar_deadline = Instant::now() + next_interval;
         }
 
         if let Some(quota) = current_quota.clone() {

@@ -222,7 +222,14 @@ impl PublishCoordinator {
             Some(now_epoch_seconds),
         )?;
         let published_visible_hash = visible_state_hash(&pending.normalized, now_epoch_seconds);
-        if self.state.last_frame_hash.as_deref() == Some(&dashboard.frame.sha256) {
+        let previous_frame_matches = self.state.last_frame_hash.as_deref() == Some(&dashboard.frame.sha256);
+        let reset_labels_unchanged = !reset_labels_changed_vs_persisted(
+            &self.state.last_reset_at_epoch_seconds,
+            &pending.normalized,
+            now_epoch_seconds,
+        );
+
+        if previous_frame_matches && reset_labels_unchanged {
             self.state.last_visible_state_hash = Some(published_visible_hash.clone());
             self.state.last_reset_at_epoch_seconds = reset_timestamps(&pending.normalized);
             self.latest_visible_hash = Some(published_visible_hash);
@@ -320,6 +327,14 @@ fn reset_labels_changed(
                     now_epoch_seconds,
                 )
             }))
+}
+
+fn reset_labels_changed_vs_persisted(
+    previous: &[i64],
+    current: &NormalizedDashboardState,
+    now_epoch_seconds: i64,
+) -> bool {
+    persisted_reset_labels_changed(previous, current, now_epoch_seconds)
 }
 
 fn persisted_reset_labels_changed(

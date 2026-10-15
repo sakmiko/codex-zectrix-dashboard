@@ -349,10 +349,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 None
             });
     let mut quota_cache = QuotaCache::new(last_known_quota.clone());
-    let mut current_quota = last_known_quota.map(|mut quota| {
-        quota.stale = true;
-        quota
-    });
+    let mut current_quota: Option<ObservedQuota> = None;
 
     let radar_cache_path = data_dir.join("radar.cache");
     let last_known_radar = load_encrypted::<RadarSemanticState>(

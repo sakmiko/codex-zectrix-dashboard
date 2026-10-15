@@ -349,7 +349,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                 None
             });
     let mut quota_cache = QuotaCache::new(last_known_quota.clone());
-    let mut current_quota: Option<ObservedQuota> = None;
 
     let radar_cache_path = data_dir.join("radar.cache");
     let last_known_radar = load_encrypted::<RadarSemanticState>(
@@ -410,7 +409,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 // 1. 同步采集额度信息
                 let result = codex.read_quota();
                 let read_succeeded = result.is_ok();
-                match quota_cache.update(result) {
+                let current_quota = match quota_cache.update(result) {
                     Ok(quota) => {
                         if !quota.stale
                             && write_encrypted(
@@ -423,13 +422,13 @@ fn run() -> Result<(), Box<dyn Error>> {
                         {
                             eprintln!("额度缓存=写入失败");
                         }
-                        current_quota = Some(quota);
+                        Some(quota)
                     }
                     Err(_) => {
-                        current_quota = None;
                         eprintln!("额度轮询=失败 且无可用缓存");
+                        None
                     }
-                }
+                };
                 if read_succeeded {
                     health.quota_fail_streak.store(0, Ordering::Relaxed);
                 } else {

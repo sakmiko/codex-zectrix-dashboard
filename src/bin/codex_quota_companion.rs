@@ -334,13 +334,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     if !(1..=5).contains(&page_id) {
         return Err("ZECTRIX_PAGE_ID 必须为 1 到 5".into());
     }
-    let poll_seconds = env_value("QUOTA_POLL_SECONDS", "600").parse::<u64>()?;
+    let poll_seconds = env_value("QUOTA_POLL_SECONDS", "1800").parse::<u64>()?;
     if poll_seconds < 60 {
         return Err("QUOTA_POLL_SECONDS 不能小于 60 秒".into());
-    }
-    let radar_poll_seconds = env_value("RADAR_POLL_SECONDS", "3600").parse::<u64>()?;
-    if radar_poll_seconds < 60 {
-        return Err("RADAR_POLL_SECONDS 不能小于 60 秒".into());
     }
     let base_url = env_value("ZECTRIX_API_BASE", "https://cloud.zectrix.com");
     let pause_schedule = QuotaPauseSchedule::parse(&env_value("QUOTA_PAUSE_WINDOWS", ""))?;
@@ -391,10 +387,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
     let mut publisher = ZectrixPublisher::new(&zectrix_key, base_url, device_id, page_id)?;
 
-    let mut quota_deadline = Instant::now();
-    let mut radar_deadline = quota_deadline;
-    let mut quota_pause_active = false;
-    let mut radar_pause_active = false;
+    let mut poll_deadline = Instant::now();
+    let mut pause_active = false;
     // 额度连续失败计数：达到上限则记日志自杀，由 systemd 拉起。
     // 可用 QUOTA_MAX_FAIL_STREAK 覆盖，默认 3；暂停窗口内的跳过不计入。
     let max_fail_streak: u64 = env_value("QUOTA_MAX_FAIL_STREAK", "3")
@@ -403,18 +397,20 @@ fn run() -> Result<(), Box<dyn Error>> {
         .max(1);
     loop {
         let now = unix_time_seconds()?;
-        if Instant::now() >= quota_deadline {
+        if Instant::now() >= poll_deadline {
             if let Some(until_resume) = pause_schedule.seconds_until_resume() {
-                if !quota_pause_active {
-                    eprintln!("额度轮询=暂停 TZ={timezone}");
-                    quota_pause_active = true;
+                if !pause_active {
+                    eprintln!("轮询=夜间暂停 TZ={timezone}");
+                    pause_active = true;
                 }
-                quota_deadline = Instant::now() + Duration::from_secs(until_resume.min(60));
+                poll_deadline = Instant::now() + Duration::from_secs(until_resume.min(60));
             } else {
-                if quota_pause_active {
-                    eprintln!("额度轮询=恢复 TZ={timezone}");
-                    quota_pause_active = false;
+                if pause_active {
+                    eprintln!("轮询=夜间恢复 TZ={timezone}");
+                    pause_active = false;
                 }
+
+                // 1. 同步采集额度信息
                 let result = codex.read_quota();
                 let read_succeeded = result.is_ok();
                 match quota_cache.update(result) {
@@ -449,24 +445,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                         return Err(format!("额度连续失败{streak}次，触发自杀重启").into());
                     }
                 }
-                quota_deadline = Instant::now()
-                    + Duration::from_secs(if read_succeeded { poll_seconds } else { 60 });
-            }
-        }
 
-        if Instant::now() >= radar_deadline {
-            if let Some(until_resume) = pause_schedule.seconds_until_resume() {
-                if !radar_pause_active {
-                    eprintln!("重置雷达轮询=暂停 TZ={timezone}");
-                    radar_pause_active = true;
-                }
-                radar_deadline = Instant::now() + Duration::from_secs(until_resume.min(60));
-            } else {
-                if radar_pause_active {
-                    eprintln!("重置雷达轮询=恢复 TZ={timezone}");
-                    radar_pause_active = false;
-                }
-                let mut next_interval = Duration::from_secs(radar_poll_seconds);
+                // 2. 同步采集重置雷达信息
                 match radar_client.fetch() {
                     RadarFetch::Modified(parsed) => {
                         radar_cache.accept(parsed, now);
@@ -485,54 +465,52 @@ fn run() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     RadarFetch::NotModified => radar_cache.confirm_unchanged(now),
-                    RadarFetch::Failed {
-                        retry_after_seconds,
-                        ..
-                    } => {
+                    RadarFetch::Failed { .. } => {
                         radar_cache.mark_failed();
-                        next_interval = Duration::from_secs(retry_after_seconds.unwrap_or(60).max(60));
                         eprintln!("重置雷达=暂不可用");
                     }
                 }
-                radar_deadline = Instant::now() + next_interval;
+
+                // 3. 一同组装并尝试推送
+                if let Some(quota) = current_quota.clone() {
+                    let radar = radar_cache.display(now);
+                    coordinator.observe(
+                        ObservedDashboardState {
+                            quota: quota.clone(),
+                            radar: radar.clone(),
+                        },
+                        now,
+                    );
+                    let attempt = coordinator.try_publish(now, &mut publisher)?;
+                    let poll_status = if quota.stale {
+                        "使用上次额度"
+                    } else {
+                        "可用"
+                    };
+                    eprintln!(
+                        "额度={poll_status} 重置雷达={} 发布={}",
+                        radar_display_label(radar),
+                        publish_result_label(attempt)
+                    );
+                    if write_encrypted(
+                        &publisher_state_path,
+                        coordinator.state(),
+                        &codex.cache_cipher,
+                        PUBLISHER_CACHE_MAGIC,
+                    )
+                    .is_err()
+                    {
+                        eprintln!("发布状态缓存=写入失败");
+                    }
+                }
+
+                poll_deadline = Instant::now()
+                    + Duration::from_secs(if read_succeeded { poll_seconds } else { 60 });
             }
         }
 
-        if let Some(quota) = current_quota.clone() {
-            let radar = radar_cache.display(now);
-            coordinator.observe(
-                ObservedDashboardState {
-                    quota: quota.clone(),
-                    radar: radar.clone(),
-                },
-                now,
-            );
-            let attempt = coordinator.try_publish(now, &mut publisher)?;
-            let poll_status = if quota.stale {
-                "使用上次额度"
-            } else {
-                "可用"
-            };
-            eprintln!(
-                "额度={poll_status} 重置雷达={} 发布={}",
-                radar_display_label(radar),
-                publish_result_label(attempt)
-            );
-            if write_encrypted(
-                &publisher_state_path,
-                coordinator.state(),
-                &codex.cache_cipher,
-                PUBLISHER_CACHE_MAGIC,
-            )
-            .is_err()
-            {
-                eprintln!("发布状态缓存=写入失败");
-            }
-        }
-
-        let wait = quota_deadline
-            .saturating_duration_since(Instant::now())
-            .min(radar_deadline.saturating_duration_since(Instant::now()));
+        let wait = poll_deadline
+            .saturating_duration_since(Instant::now());
         health.mark_ok();
         thread::sleep(wait);
     }

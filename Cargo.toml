@@ -1,6 +1,6 @@
 [package]
 name = "codex-zectrix-dashboard"
-version = "0.1.9"
+version = "0.1.7"
 edition = "2024"
 license = "MIT"
 

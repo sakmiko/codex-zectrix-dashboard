@@ -98,8 +98,11 @@ impl FramePublisher for ZectrixPublisher {
             .file_name("codex-dashboard.png")
             .mime_str("image/png")
             .map_err(|_| ZectrixPublishError::Image)?;
+        let dither = std::env::var("ZECTRIX_DITHER")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
         let form = Form::new()
-            .text("dither", "false")
+            .text("dither", if dither { "true" } else { "false" })
             .text("pageId", self.page_id.to_string())
             .part("images", image);
         let response = self

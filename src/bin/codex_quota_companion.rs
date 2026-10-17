@@ -362,7 +362,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     })
     .unwrap_or_default();
     let mut radar_cache = RadarCache::new(last_known_radar);
-    let mut radar_client = RadarClient::new("https://codex-resets.com/api/v1/status")?;
+    let radar_url = env_value("RADAR_STATUS_URL", "https://codex-resets.com/api/v1/status");
+    let mut radar_client = RadarClient::new(&radar_url)?;
 
     let publisher_state_path = data_dir.join("publisher.cache");
     let publisher_state = load_encrypted::<PublisherState>(
@@ -1305,6 +1306,15 @@ fn hex_nibble(value: u8) -> Option<u8> {
 }
 
 fn read_secret(variable: &str) -> Result<Zeroizing<String>, Box<dyn Error>> {
+    // 优先读取直接设置的环境变量（例如 ZECTRIX_API_KEY）
+    let direct_var = variable.strip_suffix("_FILE").unwrap_or(variable);
+    if let Ok(value) = std::env::var(direct_var) {
+        let value = value.trim().to_owned();
+        if !value.is_empty() {
+            return Ok(Zeroizing::new(value));
+        }
+    }
+
     let path = required_env(variable)?;
     let bytes = fs::read(path)?;
     let value = String::from_utf8(bytes)?;

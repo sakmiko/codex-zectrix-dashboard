@@ -349,7 +349,7 @@ fn render_mock_preview(out_path: &str) -> Result<(), Box<dyn Error>> {
                 stale: false,
             },
         },
-        now as u64,
+        now,
         codex_zectrix_dashboard::DisplayConfig::default(),
     )?;
     output.frame.write_png(out_path)?;

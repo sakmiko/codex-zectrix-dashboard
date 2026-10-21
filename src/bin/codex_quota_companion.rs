@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -256,19 +256,15 @@ fn dispatch_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
 
     // 4. 远程/本地服务健康检查：--check [host:port]
     if let Some(pos) = args.iter().position(|a| a == "--check") {
-        let target = args
-            .get(pos + 1)
-            .map(String::as_str)
-            .unwrap_or_else(|| &env_value("HEALTH_LISTEN", "127.0.0.1:9595"));
+        let default_target = env_value("HEALTH_LISTEN", "127.0.0.1:9595");
+        let target = args.get(pos + 1).map(String::as_str).unwrap_or(&default_target);
         return query_local_control(target, "GET /healthz");
     }
 
     // 5. 立即触发同步与刷新上屏：--trigger-refresh
     if let Some(pos) = args.iter().position(|a| a == "--trigger-refresh" || a == "--refresh") {
-        let target = args
-            .get(pos + 1)
-            .map(String::as_str)
-            .unwrap_or_else(|| &env_value("HEALTH_LISTEN", "127.0.0.1:9595"));
+        let default_target = env_value("HEALTH_LISTEN", "127.0.0.1:9595");
+        let target = args.get(pos + 1).map(String::as_str).unwrap_or(&default_target);
         return query_local_control(target, "POST /refresh");
     }
 
@@ -327,18 +323,18 @@ fn query_local_control(target: &str, request_line: &str) -> Result<(), Box<dyn E
 fn render_mock_preview(out_path: &str) -> Result<(), Box<dyn Error>> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_secs() as i64)
         .unwrap_or(1_797_000_000);
-    let output = render_dashboard(
-        ObservedDashboardState {
-            quota: ObservedQuota {
+    let output = codex_zectrix_dashboard::render_dashboard(
+        codex_zectrix_dashboard::ObservedDashboardState {
+            quota: codex_zectrix_dashboard::ObservedQuota {
                 windows: vec![
-                    ObservedQuotaWindow {
+                    codex_zectrix_dashboard::ObservedQuotaWindow {
                         name: "5 小时".into(),
                         used_percent: 32,
                         resets_at_epoch_seconds: now + 3 * 3600 + 15 * 60,
                     },
-                    ObservedQuotaWindow {
+                    codex_zectrix_dashboard::ObservedQuotaWindow {
                         name: "7 天".into(),
                         used_percent: 58,
                         resets_at_epoch_seconds: now + 3 * 86400 + 18 * 3600,
@@ -347,14 +343,14 @@ fn render_mock_preview(out_path: &str) -> Result<(), Box<dyn Error>> {
                 reset_credits: 0,
                 stale: false,
             },
-            radar: RadarDisplayState::ActiveWatch {
+            radar: codex_zectrix_dashboard::RadarDisplayState::ActiveWatch {
                 forecast_window: "未来 24 小时".into(),
                 reset_chance_percent: Some(75),
                 stale: false,
             },
         },
-        now,
-        DisplayConfig::default(),
+        now as u64,
+        codex_zectrix_dashboard::DisplayConfig::default(),
     )?;
     output.frame.write_png(out_path)?;
     println!("已成功在本地生成 400x300 1-bit 墨水屏预览图: {out_path}");

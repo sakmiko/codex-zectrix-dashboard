@@ -91,6 +91,30 @@ cargo build --locked --release --target x86_64-unknown-linux-gnu --bin codex_quo
 
 额度来自 ChatGPT 的 `/backend-api/wham/usage` 接口。该内部接口的响应格式或访问策略可能变化。重置雷达读取 [Codex Resets](https://codex-resets.com/) 的公开 API；公开公告和预测不代表 OpenAI 承诺，也不能证明个人额度已经重置。接口失败时显示不可用状态或保留仍有效的缓存，不生成推测数据。
 
+## CLI 交互控制模式 (跨平台支持 Windows & Linux)
+
+本程序采用单二进制架构设计，支持守护进程常驻模式与命令行交互工具模式：
+
+```bash
+# 1. 查看帮助与版本
+codex_quota_companion --help
+codex_quota_companion --version
+
+# 2. 本地离线渲染 400x300 1-bit 看板预览图 (无需网络与设备，验证渲染引擎)
+codex_quota_companion --preview [output.png]
+
+# 3. 探活远程或本地常驻守护进程健康状态
+codex_quota_companion --check [127.0.0.1:9595]
+
+# 4. 远程触发服务立即拉取最新额度与雷达数据并推送上屏
+codex_quota_companion --trigger-refresh [127.0.0.1:9595]
+
+# 5. 指定自定义环境变量文件启动
+codex_quota_companion --env /path/to/custom.env
+```
+
+---
+
 ## 配置
 
 | 变量 | 默认值 | 说明 |

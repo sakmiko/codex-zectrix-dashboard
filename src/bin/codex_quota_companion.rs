@@ -216,9 +216,168 @@ fn parse_clock_minute(value: &str) -> Option<u16> {
 }
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("Codex 额度看板已停止：{error}");
+    let args: Vec<String> = std::env::args().collect();
+    if let Err(error) = dispatch_cli(&args) {
+        eprintln!("Codex 额度看板异常退出：{error}");
         std::process::exit(1);
+    }
+}
+
+fn dispatch_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
+    // 0. 支持 --env <path> 加载自定义环境变量文件
+    if let Some(pos) = args.iter().position(|a| a == "--env")
+        && let Some(env_file) = args.get(pos + 1)
+    {
+        load_custom_env_file(env_file);
+    }
+
+    // 1. 帮助说明：--help / -h / help
+    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+        print_cli_help();
+        return Ok(());
+    }
+
+    // 2. 版本查询：--version / -v / version
+    if args.iter().any(|a| a == "--version" || a == "-v" || a == "version") {
+        println!("codex_quota_companion v{}", env!("CARGO_PKG_VERSION"));
+        println!("ZECTRIX NOTE4 400x300 1-bit E-Ink Codex Quota & Reset Radar Companion");
+        return Ok(());
+    }
+
+    // 3. 本地离线预览渲染：--preview [output.png]
+    if let Some(pos) = args.iter().position(|a| a == "--preview") {
+        let out_path = args
+            .get(pos + 1)
+            .map(String::as_str)
+            .unwrap_or("codex_quota_preview.png");
+        render_mock_preview(out_path)?;
+        return Ok(());
+    }
+
+    // 4. 远程/本地服务健康检查：--check [host:port]
+    if let Some(pos) = args.iter().position(|a| a == "--check") {
+        let target = args
+            .get(pos + 1)
+            .map(String::as_str)
+            .unwrap_or_else(|| &env_value("HEALTH_LISTEN", "127.0.0.1:9595"));
+        return query_local_control(target, "GET /healthz");
+    }
+
+    // 5. 立即触发同步与刷新上屏：--trigger-refresh
+    if let Some(pos) = args.iter().position(|a| a == "--trigger-refresh" || a == "--refresh") {
+        let target = args
+            .get(pos + 1)
+            .map(String::as_str)
+            .unwrap_or_else(|| &env_value("HEALTH_LISTEN", "127.0.0.1:9595"));
+        return query_local_control(target, "POST /refresh");
+    }
+
+    run()
+}
+
+fn print_cli_help() {
+    println!(
+        r#"ZECTRIX NOTE4 Codex 额度与重置雷达伴侣 CLI (v{})
+
+用法:
+  codex_quota_companion [命令/选项]
+
+基础选项:
+  --help, -h               显示此帮助信息
+  --version, -v            显示版本信息
+  --env <path>             指定自定义环境配置文件路径（默认加载 .env / 系统环境）
+
+操作模式:
+  --preview [file.png]     在本地离线生成 400x300 1-bit 墨水屏看板预览图（默认 codex_quota_preview.png）
+  --check [addr]           查询后台常驻服务的健康状态探针（默认 127.0.0.1:9595）
+  --trigger-refresh [addr] 触发后台服务立即拉取最新 Codex 额度与雷达数据并推送上屏
+
+常驻运行:
+  直接运行程序无参数时，将作为守护服务启动，按照环境变量 QUOTA_POLL_SECONDS 持续同步并推送。
+"#,
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+fn query_local_control(target: &str, request_line: &str) -> Result<(), Box<dyn Error>> {
+    use std::io::{Read as _, Write as _};
+    let addr = if target.starts_with("http://") {
+        target.trim_start_matches("http://")
+    } else {
+        target
+    };
+    let mut stream = TcpStream::connect_timeout(&addr.parse()?, Duration::from_secs(3))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "{request_line} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let status_line = response.lines().next().unwrap_or("");
+    let body = response.split("\r\n\r\n").nth(1).unwrap_or("");
+    println!("{body}");
+    if status_line.contains("200 OK") {
+        Ok(())
+    } else {
+        Err(format!("服务状态响应异常：{status_line}").into())
+    }
+}
+
+fn render_mock_preview(out_path: &str) -> Result<(), Box<dyn Error>> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(1_797_000_000);
+    let output = render_dashboard(
+        ObservedDashboardState {
+            quota: ObservedQuota {
+                windows: vec![
+                    ObservedQuotaWindow {
+                        name: "5 小时".into(),
+                        used_percent: 32,
+                        resets_at_epoch_seconds: now + 3 * 3600 + 15 * 60,
+                    },
+                    ObservedQuotaWindow {
+                        name: "7 天".into(),
+                        used_percent: 58,
+                        resets_at_epoch_seconds: now + 3 * 86400 + 18 * 3600,
+                    },
+                ],
+                reset_credits: 0,
+                stale: false,
+            },
+            radar: RadarDisplayState::ActiveWatch {
+                forecast_window: "未来 24 小时".into(),
+                reset_chance_percent: Some(75),
+                stale: false,
+            },
+        },
+        now,
+        DisplayConfig::default(),
+    )?;
+    output.frame.write_png(out_path)?;
+    println!("已成功在本地生成 400x300 1-bit 墨水屏预览图: {out_path}");
+    Ok(())
+}
+
+fn load_custom_env_file(path: &str) {
+    if let Ok(content) = fs::read_to_string(path) {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let key = k.trim();
+                let val = v.trim().trim_matches('"').trim_matches('\'');
+                if !key.is_empty() && std::env::var(key).is_err() {
+                    unsafe {
+                        std::env::set_var(key, val);
+                    }
+                }
+            }
+        }
     }
 }
 

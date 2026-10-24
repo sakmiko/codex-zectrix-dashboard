@@ -34,7 +34,7 @@ cargo build --locked --release --target x86_64-unknown-linux-gnu --bin codex_quo
 
 3. 编辑 `service.env`，填写 ZECTRIX 设备 ID。默认时区为 `Asia/Shanghai`。可将 `TZ` 改为其他 IANA 时区，并用 `QUOTA_PAUSE_WINDOWS` 设置每天暂停额度请求的时段，例如 `23:00-07:00,12:30-13:30`。雷达轮询在暂停期间继续运行。
 
-4. 将 CPA 导出的单个 Codex 登录 JSON 移入 `/var/lib/codex-quota/auths/`。确保目录中只有一个 `.json` 文件，并设置权限：
+4. **复制** CPA 导出的单个 Codex 登录 JSON 到 `/var/lib/codex-quota/auths/`，不要指向 CPA 正在读写的原始 auth 目录。看板会独立轮换 OAuth Token 并加密覆盖这份副本，不能让 CPA 与看板同时维护同一个登录文件。确保该目录中只有一个 `.json` 文件，并设置权限：
 
    ```sh
    sudo chown codex-quota:codex-quota /var/lib/codex-quota/auths/*.json
@@ -87,7 +87,9 @@ cargo build --locked --release --target x86_64-unknown-linux-gnu --bin codex_quo
 
 首次成功读取额度后，服务会先保留 CPA JSON 中的未知字段和刷新后的令牌，再尝试把 JSON 原子替换为 AES-256-GCM 密文。密文保留原文件名；加密或写入失败时，服务会保留明文源文件并在日志中报告。读取、刷新或额度解析失败时，服务不会加密或覆盖源文件。
 
-普通 OAuth 与 CPA SIWC 凭证会在到期前刷新。额度接口返回 401 时，服务也会刷新并重试。刷新后的令牌写入加密凭证和 `/var/lib/codex-quota/data/` 中的加密缓存。请保留该目录、`cache_encryption_key` 和宿主机 `/etc/machine-id`；换机后必须重新导入 CPA JSON。文件替换不能保证擦除 SSD、快照或日志文件系统中已释放的数据块。
+普通 OAuth 与 CPA SIWC 凭证会在到期前刷新。额度接口返回 401 时，服务也会刷新并重试。除此之外，`CODEX_AUTH_REFRESH_SECONDS`（默认 3600 秒）会独立、定期刷新 Token；配置 `0` 则关闭定时刷新，但不会禁用额度读取期间的到期刷新与手动刷新。**即使处于额度暂停时段，独立 OAuth 刷新仍正常运行。**刷新后的令牌写入加密凭证和 `/var/lib/codex-quota/data/` 中的加密缓存。请保留该目录、`cache_encryption_key` 和宿主机 `/etc/machine-id`；换机后必须重新导入 CPA JSON。文件替换不能保证擦除 SSD、快照或日志文件系统中已释放的数据块。
+
+手动刷新 OAuth Token：`codex_quota_companion --refresh-auth`（或向本机监听地址发送 `POST /auth/refresh`）。命令返回 `202 Accepted` 代表已排队，**不代表刷新已经成功**；应查看 systemd 日志确认结果。原有 `--trigger-refresh` / `POST /refresh` 现可强制触发额度与雷达轮询，并允许手动请求绕过额度暂停窗口。控制端仅能绑定 loopback 地址，远程使用请通过 SSH 或 Tailscale 转发。
 
 额度来自 ChatGPT 的 `/backend-api/wham/usage` 接口。该内部接口的响应格式或访问策略可能变化。重置雷达读取 [Codex Resets](https://codex-resets.com/) 的公开 API；公开公告和预测不代表 OpenAI 承诺，也不能证明个人额度已经重置。接口失败时显示不可用状态或保留仍有效的缓存，不生成推测数据。
 
@@ -109,7 +111,10 @@ codex_quota_companion --check [127.0.0.1:9595]
 # 4. 远程触发服务立即拉取最新额度与雷达数据并推送上屏
 codex_quota_companion --trigger-refresh [127.0.0.1:9595]
 
-# 5. 指定自定义环境变量文件启动
+# 5. 独立强制刷新 OAuth Token（不触发额度请求、不向屏幕推送）
+codex_quota_companion --refresh-auth [127.0.0.1:9595]
+
+# 6. 指定自定义环境变量文件启动
 codex_quota_companion --env /path/to/custom.env
 ```
 
@@ -127,8 +132,9 @@ codex_quota_companion --env /path/to/custom.env
 | `ZECTRIX_API_KEY_FILE` | 必填 | 保存 ZECTRIX API Key 的文件 |
 | `CACHE_ENCRYPTION_KEY_FILE` | 必填 | 32 字节随机密钥的 64 位十六进制编码文件 |
 | `HOST_MACHINE_ID_FILE` | `/run/host-machine-id` | Linux 宿主机 `machine-id` 文件 |
-| `QUOTA_POLL_SECONDS` | `600` | 额度轮询间隔，最小 60 秒 |
-| `RADAR_POLL_SECONDS` | `3600` | 雷达轮询间隔，最小 60 秒 |
+| `QUOTA_POLL_SECONDS` | `1800` | 额度轮询间隔，最小 60 秒 |
+| `RADAR_POLL_SECONDS` | `3600` | 雷达独立保底轮询间隔，最小 60 秒；每次实际额度轮询时也同步更新雷达 |
+| `CODEX_AUTH_REFRESH_SECONDS` | `3600` | 独立强制刷新 OAuth Token 间隔，0 关闭自动刷新，非零最小 60 秒 |
 | `QUOTA_PAUSE_WINDOWS` | 空 | 每日暂停时段，例如 `23:00-07:00` |
 | `TZ` | `Asia/Shanghai` | 暂停时段使用的 IANA 时区 |
 

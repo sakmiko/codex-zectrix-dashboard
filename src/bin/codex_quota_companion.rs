@@ -4,8 +4,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+    Arc, Condvar, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -224,11 +224,13 @@ fn main() {
 }
 
 fn dispatch_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
-    // 0. 支持 --env <path> 加载自定义环境变量文件
+    // 环境变量优先；没有指定 --env 时自动尝试当前工作目录的 .env。
     if let Some(pos) = args.iter().position(|a| a == "--env")
         && let Some(env_file) = args.get(pos + 1)
     {
         load_custom_env_file(env_file);
+    } else {
+        load_custom_env_file(".env");
     }
 
     // 1. 帮助说明：--help / -h / help
@@ -268,6 +270,13 @@ fn dispatch_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
         return query_local_control(target, "POST /refresh");
     }
 
+    // 独立强制刷新 OAuth Token，不请求额度、不向设备推图。
+    if let Some(pos) = args.iter().position(|a| a == "--refresh-auth") {
+        let default_target = env_value("HEALTH_LISTEN", "127.0.0.1:9595");
+        let target = args.get(pos + 1).map(String::as_str).unwrap_or(&default_target);
+        return query_local_control(target, "POST /auth/refresh");
+    }
+
     run()
 }
 
@@ -287,9 +296,10 @@ fn print_cli_help() {
   --preview [file.png]     在本地离线生成 400x300 1-bit 墨水屏看板预览图（默认 codex_quota_preview.png）
   --check [addr]           查询后台常驻服务的健康状态探针（默认 127.0.0.1:9595）
   --trigger-refresh [addr] 触发后台服务立即拉取最新 Codex 额度与雷达数据并推送上屏
+  --refresh-auth [addr]    立即请求后台独立刷新 OAuth Token，并安全更新本机登录凭证
 
 常驻运行:
-  直接运行程序无参数时，将作为守护服务启动，按照环境变量 QUOTA_POLL_SECONDS 持续同步并推送。
+  守护模式分别使用 QUOTA_POLL_SECONDS、RADAR_POLL_SECONDS 和 CODEX_AUTH_REFRESH_SECONDS 调度。
 "#,
         env!("CARGO_PKG_VERSION")
     );
@@ -313,7 +323,7 @@ fn query_local_control(target: &str, request_line: &str) -> Result<(), Box<dyn E
     let status_line = response.lines().next().unwrap_or("");
     let body = response.split("\r\n\r\n").nth(1).unwrap_or("");
     println!("{body}");
-    if status_line.contains("200 OK") {
+    if status_line.starts_with("HTTP/1.1 200 ") || status_line.starts_with("HTTP/1.1 202 ") {
         Ok(())
     } else {
         Err(format!("服务状态响应异常：{status_line}").into())
@@ -386,6 +396,9 @@ struct HealthState {
     last_ok_at: AtomicU64,
     /// 累计连续额度失败次数（达到上限触发自杀）。
     quota_fail_streak: AtomicU64,
+    full_refresh_requested: AtomicBool,
+    auth_refresh_requested: AtomicBool,
+    wake_signal: (Mutex<()>, Condvar),
 }
 
 impl HealthState {
@@ -398,6 +411,9 @@ impl HealthState {
             started_at: now,
             last_ok_at: AtomicU64::new(0),
             quota_fail_streak: AtomicU64::new(0),
+            full_refresh_requested: AtomicBool::new(false),
+            auth_refresh_requested: AtomicBool::new(false),
+            wake_signal: (Mutex::new(()), Condvar::new()),
         })
     }
 
@@ -408,17 +424,34 @@ impl HealthState {
             .unwrap_or(0);
         self.last_ok_at.store(now, Ordering::Relaxed);
     }
+
+    fn request_refresh(&self, auth_only: bool) {
+        if auth_only {
+            self.auth_refresh_requested.store(true, Ordering::SeqCst);
+        } else {
+            self.full_refresh_requested.store(true, Ordering::SeqCst);
+        }
+        self.wake_signal.1.notify_all();
+    }
 }
 
 /// 启动 health 探针（标准库 TcpListener，无额外依赖）。
 /// - `HEALTH_LISTEN` 为空则不启动；默认 `127.0.0.1:9595`。
-/// - `GET /healthz` 返回 200 + `{"status":"ok",...}`；其余路径 404。
+/// - `GET /healthz` 返回健康状态；`POST /refresh` 和 `POST /auth/refresh` 排队唤醒主循环。
 fn spawn_health_probe(state: Arc<HealthState>) -> Option<thread::JoinHandle<()>> {
     let addr = match std::env::var("HEALTH_LISTEN") {
         Ok(v) if v.trim().is_empty() => return None,
         Ok(v) => v,
         Err(_) => "127.0.0.1:9595".to_owned(),
     };
+    // 控制端无远程鉴权，只允许 loopback 绑定，远程操作应使用 SSH/Tailscale 转发。
+    if !addr
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|address| address.ip().is_loopback())
+    {
+        eprintln!("health探针=只能监听本机 loopback 地址：{addr}");
+        return None;
+    }
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
@@ -438,7 +471,7 @@ fn spawn_health_probe(state: Arc<HealthState>) -> Option<thread::JoinHandle<()>>
             let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             let first_line = req.lines().next().unwrap_or("");
-            let (code, body) = if first_line.starts_with("GET /healthz")
+            let (code, body) = if first_line.starts_with("GET /healthz ")
                 || first_line.starts_with("GET /health")
             {
                 let now = SystemTime::now()
@@ -460,12 +493,22 @@ fn spawn_health_probe(state: Arc<HealthState>) -> Option<thread::JoinHandle<()>>
                         fails,
                     ),
                 )
+            } else if first_line.starts_with("POST /refresh ") {
+                state.request_refresh(false);
+                (202, "{\"status\":\"queued\",\"action\":\"full_refresh\"}".to_owned())
+            } else if first_line.starts_with("POST /auth/refresh ") {
+                state.request_refresh(true);
+                (202, "{\"status\":\"queued\",\"action\":\"auth_refresh\"}".to_owned())
             } else {
                 (404, "{\"status\":\"not_found\"}".to_owned())
             };
             let resp = format!(
                 "HTTP/1.1 {code} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                if code == 200 { "OK" } else { "Not Found" },
+                match code {
+                    200 => "OK",
+                    202 => "Accepted",
+                    _ => "Not Found",
+                },
                 body.len(),
             );
             let _ = stream.write_all(resp.as_bytes());
@@ -493,6 +536,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     if poll_seconds < 60 {
         return Err("QUOTA_POLL_SECONDS 不能小于 60 秒".into());
     }
+    let radar_poll_seconds = env_value("RADAR_POLL_SECONDS", "3600").parse::<u64>()?;
+    if radar_poll_seconds < 60 {
+        return Err("RADAR_POLL_SECONDS 不能小于 60 秒".into());
+    }
+    let auth_refresh_seconds = env_value("CODEX_AUTH_REFRESH_SECONDS", "3600").parse::<u64>()?;
+    if auth_refresh_seconds != 0 && auth_refresh_seconds < 60 {
+        return Err("CODEX_AUTH_REFRESH_SECONDS 必须为 0（关闭）或至少 60 秒".into());
+    }
     let base_url = env_value("ZECTRIX_API_BASE", "https://cloud.zectrix.com");
     let pause_schedule = QuotaPauseSchedule::parse(&env_value("QUOTA_PAUSE_WINDOWS", ""))?;
     let timezone = env_value("TZ", "Asia/Shanghai");
@@ -504,6 +555,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 None
             });
     let mut quota_cache = QuotaCache::new(last_known_quota.clone());
+    let mut current_quota = last_known_quota;
 
     let radar_cache_path = data_dir.join("radar.cache");
     let last_known_radar = load_encrypted::<RadarSemanticState>(
@@ -540,6 +592,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut publisher = ZectrixPublisher::new(&zectrix_key, base_url, device_id, page_id)?;
 
     let mut poll_deadline = Instant::now();
+    let mut radar_deadline = Instant::now();
+    let mut auth_deadline = (auth_refresh_seconds > 0)
+        .then(|| Instant::now() + Duration::from_secs(auth_refresh_seconds));
     let mut pause_active = false;
     // 额度连续失败计数：达到上限则记日志自杀，由 systemd 拉起。
     // 可用 QUOTA_MAX_FAIL_STREAK 覆盖，默认 3；暂停窗口内的跳过不计入。
@@ -549,8 +604,30 @@ fn run() -> Result<(), Box<dyn Error>> {
         .max(1);
     loop {
         let now = unix_time_seconds()?;
-        if Instant::now() >= poll_deadline {
-            if let Some(until_resume) = pause_schedule.seconds_until_resume() {
+        let force_full = health.full_refresh_requested.swap(false, Ordering::SeqCst);
+        let force_auth = health.auth_refresh_requested.swap(false, Ordering::SeqCst);
+        if force_auth || auth_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            let refreshed = codex.refresh_auth();
+            match &refreshed {
+                Ok(()) => eprintln!("OAuth 登录凭证=独立刷新成功"),
+                Err(reason) => eprintln!("OAuth 登录凭证=独立刷新失败：{reason}"),
+            }
+            if auth_refresh_seconds > 0 {
+                let retry_seconds = if refreshed.is_ok() {
+                    auth_refresh_seconds
+                } else {
+                    auth_refresh_seconds.min(300)
+                };
+                auth_deadline = Some(Instant::now() + Duration::from_secs(retry_seconds));
+            } else {
+                auth_deadline = None;
+            }
+        }
+
+        let mut should_observe = false;
+        let mut quota_polled = false;
+        if force_full || Instant::now() >= poll_deadline {
+            if !force_full && let Some(until_resume) = pause_schedule.seconds_until_resume() {
                 if !pause_active {
                     eprintln!("轮询=夜间暂停 TZ={timezone}");
                     pause_active = true;
@@ -564,8 +641,9 @@ fn run() -> Result<(), Box<dyn Error>> {
 
                 // 1. 同步采集额度信息
                 let result = codex.read_quota();
+                quota_polled = true;
                 let read_succeeded = result.is_ok();
-                let current_quota = match quota_cache.update(result) {
+                current_quota = match quota_cache.update(result) {
                     Ok(quota) => {
                         if !quota.stale
                             && write_encrypted(
@@ -598,73 +676,86 @@ fn run() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // 2. 同步采集重置雷达信息
-                match radar_client.fetch() {
-                    RadarFetch::Modified(parsed) => {
-                        radar_cache.accept(parsed, now);
-                        if write_encrypted(
-                            &radar_cache_path,
-                            radar_cache.semantic(),
-                            &codex.cache_cipher,
-                            RADAR_CACHE_MAGIC,
-                        )
-                        .is_err()
-                        {
-                            radar_cache.mark_failed();
-                            eprintln!("重置雷达缓存=写入失败");
-                        } else {
-                            eprintln!("重置雷达=已更新");
-                        }
-                    }
-                    RadarFetch::NotModified => radar_cache.confirm_unchanged(now),
-                    RadarFetch::Failed { .. } => {
-                        radar_cache.mark_failed();
-                        eprintln!("重置雷达=暂不可用");
-                    }
-                }
-
-                // 3. 一同组装并尝试推送
-                if let Some(quota) = current_quota.clone() {
-                    let radar = radar_cache.display(now);
-                    coordinator.observe(
-                        ObservedDashboardState {
-                            quota: quota.clone(),
-                            radar: radar.clone(),
-                        },
-                        now,
-                    );
-                    let attempt = coordinator.try_publish(now, &mut publisher)?;
-                    let poll_status = if quota.stale {
-                        "使用上次额度"
-                    } else {
-                        "可用"
-                    };
-                    eprintln!(
-                        "额度={poll_status} 重置雷达={} 发布={}",
-                        radar_display_label(radar),
-                        publish_result_label(attempt)
-                    );
-                    if write_encrypted(
-                        &publisher_state_path,
-                        coordinator.state(),
-                        &codex.cache_cipher,
-                        PUBLISHER_CACHE_MAGIC,
-                    )
-                    .is_err()
-                    {
-                        eprintln!("发布状态缓存=写入失败");
-                    }
-                }
-
+                should_observe = true;
                 poll_deadline = Instant::now()
                     + Duration::from_secs(if read_succeeded { poll_seconds } else { 60 });
             }
         }
 
-        let wait = poll_deadline
-            .saturating_duration_since(Instant::now());
+        // 雷达拥有独立调度：即使额度暂停，也照常获取公开重置信号。
+        if force_full || quota_polled || Instant::now() >= radar_deadline {
+            match radar_client.fetch() {
+                RadarFetch::Modified(parsed) => {
+                    radar_cache.accept(parsed, now);
+                    if write_encrypted(
+                        &radar_cache_path,
+                        radar_cache.semantic(),
+                        &codex.cache_cipher,
+                        RADAR_CACHE_MAGIC,
+                    )
+                    .is_err()
+                    {
+                        radar_cache.mark_failed();
+                        eprintln!("重置雷达缓存=写入失败");
+                    } else {
+                        eprintln!("重置雷达=已更新");
+                    }
+                }
+                RadarFetch::NotModified => radar_cache.confirm_unchanged(now),
+                RadarFetch::Failed { .. } => {
+                    radar_cache.mark_failed();
+                    eprintln!("重置雷达=暂不可用");
+                }
+            }
+            radar_deadline = Instant::now() + Duration::from_secs(radar_poll_seconds);
+            should_observe = true;
+        }
+
+        // 仅在采集发生变化时更新渲染状态；延迟的推送也能独立重试。
+        if should_observe && let Some(quota) = current_quota.clone() {
+            let radar = radar_cache.display(now);
+            coordinator.observe(
+                ObservedDashboardState {
+                    quota: quota.clone(),
+                    radar: radar.clone(),
+                },
+                now,
+            );
+            eprintln!(
+                "额度={} 重置雷达={}",
+                if quota.stale { "使用上次额度" } else { "可用" },
+                radar_display_label(radar)
+            );
+        }
+        if coordinator.has_pending() {
+            let attempt = coordinator.try_publish(now, &mut publisher)?;
+            eprintln!("发布={}", publish_result_label(attempt));
+            if write_encrypted(
+                &publisher_state_path,
+                coordinator.state(),
+                &codex.cache_cipher,
+                PUBLISHER_CACHE_MAGIC,
+            )
+            .is_err()
+            {
+                eprintln!("发布状态缓存=写入失败");
+            }
+        }
+
+        let mut next_deadline = poll_deadline.min(radar_deadline);
+        if let Some(auth) = auth_deadline {
+            next_deadline = next_deadline.min(auth);
+        }
+        if coordinator.has_pending() {
+            next_deadline = next_deadline.min(Instant::now() + Duration::from_secs(60));
+        }
+        let wait = next_deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(60));
         health.mark_ok();
-        thread::sleep(wait);
+        if let Ok(guard) = health.wake_signal.0.lock() {
+            let _ = health.wake_signal.1.wait_timeout(guard, wait);
+        }
     }
 }
 
@@ -681,6 +772,32 @@ impl CodexClient {
             auth_cache_path,
             cache_cipher,
         })
+    }
+
+    /// 强制刷新独立副本中的 OAuth Token，并以原子写入方式更新加密登录文件。
+    /// CPA 正在使用的原始 JSON 不应配置为 CODEX_AUTH_PATH。
+    fn refresh_auth(&self) -> Result<(), String> {
+        let LoadedCredential {
+            mut credential,
+            source_sha256,
+            source_json,
+            stored_source,
+            ..
+        } = self.load_credential()?;
+        self.refresh_credential(&mut credential)?;
+
+        // OAuth 服务可能轮换 refresh_token。优先存入加密缓存，即使源文件写入
+        // 失败，也可以在下一次请求中继续使用这份新令牌，而不会回退到旧令牌。
+        self.save_credential(&credential, &source_sha256)?;
+        let updated_sha256 = encrypt_source_file(
+            &self.auth_path,
+            &stored_source,
+            &source_json,
+            &credential,
+            &self.cache_cipher,
+        )?;
+        self.save_credential(&credential, &updated_sha256)?;
+        Ok(())
     }
 
     fn read_quota(&self) -> Result<ObservedQuota, String> {
@@ -1524,6 +1641,17 @@ mod tests {
     use super::*;
 
     const TEST_MACHINE_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn refresh_requests_set_independent_flags() {
+        let health = HealthState::new();
+        health.request_refresh(true);
+        assert!(health.auth_refresh_requested.swap(false, Ordering::SeqCst));
+        assert!(!health.full_refresh_requested.load(Ordering::SeqCst));
+        health.request_refresh(false);
+        assert!(health.full_refresh_requested.swap(false, Ordering::SeqCst));
+        assert!(!health.auth_refresh_requested.load(Ordering::SeqCst));
+    }
 
     fn test_cipher(machine_id: &str) -> CacheCipher {
         let secret = [0x5a; 32];
